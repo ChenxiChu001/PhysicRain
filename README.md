@@ -1,26 +1,55 @@
-# PhysicRain
-PhysicRain: 一个基于物理的雨天先验生成器与空间条件引擎，用于引导视觉大模型进行可控的天气编辑A physics-based rain prior generator and spatial conditioning engine for guiding vision foundation models in controllable weather editing.
 # PhysicRain 🌧️
-
 **A Physics-Based Rain Prior Generator for Vision Foundation Models**
+**面向视觉大模型的物理雨景先验生成器**
 
-PhysicRain 是一个轻量级、基于纯物理定律的 3D 雨景仿真与渲染引擎。本项目旨在生成高保真、结构物理受控的雨滴分布图（Spatial Conditioning Map），为下游的扩散模型（Diffusion Models, 如 DiT、Stable Diffusion）在处理复杂天气场景生成与编辑任务时，提供精确的**空间物理先验（Physics-based Prior）**。
+**PhysicRain** is a lightweight, pure physics-based 3D rain simulation and rendering engine. It is designed to generate high-fidelity, structurally controlled spatial drop distribution maps. These maps serve as precise **physics-based priors (Spatial Conditioning)** for downstream Diffusion Models (e.g., DiT, Stable Diffusion) to guide complex weather editing and scene generation, solving the issue of physical inconsistency in pure data-driven AIGC models.
 
-## ✨ 核心特性 (Key Features)
+**PhysicRain** 是一个轻量级、基于纯物理定律的 3D 雨景仿真与渲染引擎。本项目旨在生成高保真、物理结构受控的雨滴空间分布图。该特征图可作为精确的**空间物理先验（Physics-based Prior）**，引导下游的扩散模型（如 DiT, Stable Diffusion）进行复杂的天气编辑与场景生成，解决纯数据驱动的 AIGC 模型在物理结构上容易崩坏的痛点。
 
-* **🔬 严谨的微物理建模 (Microphysics Modeling):**
-    * 采用 **Gamma 分布**精准模拟真实气象学中的雨滴尺寸分布（Drop Size Distribution）。
-    * 内建空气动力学终端速度模型与风速矢量计算，真实还原 3D 空间内的雨滴运动学轨迹。
-* **🎥 高级光学前向渲染 (Advanced Optical Rendering):**
-    * 集成 **Henyey-Greenstein 相位函数**，精确计算光线在雨滴介质内部的次表面散射。
-    * 通过薄透镜物理模型计算弥散圆 (Circle of Confusion)，结合运动位移，利用光斑（Bokeh）沿轨迹积分实现逼真的动态模糊（Motion Blur）与景深（DoF）效果。
-* **🤖 完美契合 AIGC 架构 (AIGC-Ready Guidance):**
-    * 输出的高对比度物理特征图，可无缝作为 ControlNet 的条件输入，或转化为**本征图感知注意力机制（IMAA）**中的空间掩码（Spatial Mask）。
-    * 有效引导 Vision Foundation Models 生成物理合理的折射、反光及地面湿润等复杂光影交互。
+---
 
-## 🚀 快速开始 (Quick Start)
+## ✨ Features / 核心特性
 
-### 依赖安装
-本项目基于轻量级的 Python 科学计算栈，无重型深度学习框架依赖：
+* **🔬 Microphysics Modeling / 严谨的微物理建模**
+  * Accurately simulates Drop Size Distribution (DSD) using the **Gamma distribution**. Incorporates aerodynamic terminal velocity and 3D wind vectors to trace realistic physical trajectories.
+  * 采用 **Gamma 分布**精准模拟真实气象学中的雨滴尺寸分布。内建空气动力学终端速度模型与 3D 风速矢量计算，真实还原粒子运动学轨迹。
+* **🎥 Advanced Optical Rendering / 高级光学前向渲染**
+  * Integrates the **Henyey-Greenstein phase function** for sub-surface scattering. Simulates Depth of Field (DoF) via Circle of Confusion (CoC) and integrates bokeh along the motion path to create highly realistic motion blur.
+  * 集成 **Henyey-Greenstein 相位函数**精确计算次表面散射。通过计算弥散圆 (CoC) 模拟景深，并利用光斑 (Bokeh) 沿轨迹积分实现逼真的动态模糊。
+* **🤖 AIGC-Ready Guidance / 完美契合大模型架构**
+  * Outputs high-contrast spatial masks tailored for zero-invasive conditioning mechanisms like **Intrinsic Map-Aware Attention (IMAA)** or ControlNet, forcing foundation models to render realistic light-water interactions.
+  * 输出的高保真特征图可直接转化为**本征图感知注意力机制（IMAA）**或 ControlNet 的空间掩码，引导视觉大模型精准“脑补”出水滴折射与局部积水反光等复杂交互。
+
+---
+
+## 🚀 Quick Start / 快速开始
+
+### Dependencies / 依赖安装
+This project is built on a lightweight Python scientific stack. No heavy deep learning frameworks are required for the rendering engine.
+本项目基于轻量级的 Python 科学计算栈，渲染引擎部分无重型深度学习框架依赖：
 ```bash
 pip install numpy scikit-image scipy pillow tqdm
+Run the Engine / 运行引擎
+Execute the main script to start the 3D particle importance sampling and the forward rendering pipeline.
+直接运行主程序，引擎将自动执行 3D 粒子重要性采样及前向渲染管线：
+
+Bash
+python main.py
+(After execution, a high-res rain prior map like rain_sim_R5.0_final_droplet.png will be generated in the root directory. / 执行完成后，根目录下将生成一张高清的物理雨滴引导图。)
+
+⚙️ Configuration / 核心参数配置
+You can easily control the physics environment by tweaking the parameters in the Config class within main.py:
+你可以通过修改 main.py 中 Config 类的参数，轻松控制物理世界的环境变量：
+
+RAIN_RATE: Rainfall intensity / 降雨强度 (mm/h)
+
+WIND_VECTOR: 3D wind speed / 3D 风速向量 (m/s)
+
+EXPOSURE_TIME: Camera exposure time affecting motion blur length / 模拟相机的曝光时间，影响雨丝长度
+
+FOCUS_DISTANCE & F_NUMBER: Depth of Field controls / 景深控制参数
+
+🗺️ Roadmap / 后续计划
+[x] Step 1: Build a physics-based 3D rain simulation and optical rendering engine (Current Repo). / 完成基于物理的 3D 雨滴仿真与光学渲染引擎。
+
+[ ] Step 2: Extract multi-scale physical features (e.g., via DINOv2) and inject them into a Diffusion Transformer (DiT) using Attention Bias (IMAA) for high-fidelity rainy scene transfer. / 提取多尺度物理特征，通过注意力偏置注入机制引导 DiT 完成真实雨天场景的高保真迁移。
