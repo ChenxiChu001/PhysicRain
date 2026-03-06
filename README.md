@@ -32,7 +32,30 @@ pip install numpy scikit-image scipy pillow tqdm
 Run the Engine / 运行引擎
 Execute the main script to start the 3D particle importance sampling and the forward rendering pipeline.
 直接运行主程序，引擎将自动执行 3D 粒子重要性采样及前向渲染管线：
+## 📸 Gallery / 渲染效果展示
 
+本项目支持对气象与光学参数进行高度可控的调节。以下展示了在强降雨（`RAIN_RATE = 50`）基准下，控制单一物理变量所带来的渲染变化：
+
+### 1. 粒子密度控制 (Particle Budget)
+调整 `PARTICLE_BUDGET` 参数，精确控制视锥体内的雨滴数量，模拟不同量级的降雨视觉密度：
+
+| 稀疏 (Sparse) <br> `N = 1000` | 中等 (Medium) <br> `N = 5000` | 密集 (Dense) <br> `N = 20000` |
+| :---: | :---: | :---: |
+| <img src="assets/1.png" width="300"> | <img src="assets/2.png" width="300"> | <img src="assets/3.png" width="300"> |
+
+### 2. 风速运动学控制 (Wind Vector)
+调整 `WIND_VECTOR` 的水平分量，结合曝光时间，生成符合流体力学位移的斜向雨丝与动态模糊：
+
+| 微风 (Light Wind) <br> `Wind X = 1.0` | 阵风 (Moderate Wind) <br> `Wind X = 2.0` | 大风 (Strong Wind) <br> `Wind X = 3.0` |
+| :---: | :---: | :---: |
+| <img src="assets/4.png" width="300"> | <img src="5.png" width="300"> | <img src="6.png" width="300"> |
+
+### 3. 光照与散射控制 (Light Direction)
+调整光源方向 `LIGHT_DIRECTION`，配合 Henyey-Greenstein 相位函数，改变雨滴表面的高光反射与次表面散射表现：
+
+| 右侧顶光 (Light 1) <br> `[0.5, -0.3, 0.8]` | 左侧顶光 (Light 2) <br> `[-0.5, -0.5, 0.8]` | 左侧顶光 (Light 3) <br> `[-0.5, -0.5, 0.8]` |
+| :---: | :---: | :---: |
+| <img src="assets/7.png" width="300"> | <img src="assets/8.png" width="300"> | <img src="assets/9.png" width="300"> |
 Bash
 python main.py
 (After execution, a high-res rain prior map like rain_sim_R5.0_final_droplet.png will be generated in the root directory. / 执行完成后，根目录下将生成一张高清的物理雨滴引导图。)
