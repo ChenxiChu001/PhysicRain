@@ -38,7 +38,7 @@
 
 | 微风 (Light Wind) <br> `Wind X = 1.0` | 阵风 (Moderate Wind) <br> `Wind X = 2.0` | 大风 (Strong Wind) <br> `Wind X = 3.0` |
 | :---: | :---: | :---: |
-| <img src="assets/4.png" width="300"> | <img src="5.png" width="300"> | <img src="6.png" width="300"> |
+| <img src="assets/4.png" width="300"> | <img src="assets/5.png" width="300"> | <img src="assets/6.png" width="300"> |
 
 ### 3. 光照与散射控制 (Light Direction)
 调整光源方向 `LIGHT_DIRECTION`，配合 Henyey-Greenstein 相位函数，改变雨滴表面的高光反射与次表面散射表现：
