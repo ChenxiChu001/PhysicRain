@@ -22,16 +22,6 @@
 
 ---
 
-## 🚀 Quick Start / 快速开始
-
-### Dependencies / 依赖安装
-This project is built on a lightweight Python scientific stack. No heavy deep learning frameworks are required for the rendering engine.
-本项目基于轻量级的 Python 科学计算栈，渲染引擎部分无重型深度学习框架依赖：
-```bash
-pip install numpy scikit-image scipy pillow tqdm
-Run the Engine / 运行引擎
-Execute the main script to start the 3D particle importance sampling and the forward rendering pipeline.
-直接运行主程序，引擎将自动执行 3D 粒子重要性采样及前向渲染管线：
 ## 📸 Gallery / 渲染效果展示
 
 本项目支持对气象与光学参数进行高度可控的调节。以下展示了在强降雨（`RAIN_RATE = 50`）基准下，控制单一物理变量所带来的渲染变化：
@@ -56,6 +46,20 @@ Execute the main script to start the 3D particle importance sampling and the for
 | 右侧顶光 (Light 1) <br> `[0.5, -0.3, 0.8]` | 左侧顶光 (Light 2) <br> `[-0.5, -0.5, 0.8]` | 左侧顶光 (Light 3) <br> `[-0.5, -0.5, 0.8]` |
 | :---: | :---: | :---: |
 | <img src="assets/7.png" width="300"> | <img src="assets/8.png" width="300"> | <img src="assets/9.png" width="300"> |
+
+---
+
+## 🚀 Quick Start / 快速开始
+
+### Dependencies / 依赖安装
+This project is built on a lightweight Python scientific stack. No heavy deep learning frameworks are required for the rendering engine.
+本项目基于轻量级的 Python 科学计算栈，渲染引擎部分无重型深度学习框架依赖：
+```bash
+pip install numpy scikit-image scipy pillow tqdm
+Run the Engine / 运行引擎
+Execute the main script to start the 3D particle importance sampling and the forward rendering pipeline.
+直接运行主程序，引擎将自动执行 3D 粒子重要性采样及前向渲染管线：
+
 Bash
 python main.py
 (After execution, a high-res rain prior map like rain_sim_R5.0_final_droplet.png will be generated in the root directory. / 执行完成后，根目录下将生成一张高清的物理雨滴引导图。)
