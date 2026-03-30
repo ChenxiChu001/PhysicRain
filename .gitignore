@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.ico
+*.egg-info/
+dist/
+build/
+
+# 测试输出（不上传大图）
+test_output/
+test_masks/
+test/
+rain_masks/
+rain_output/
+
+# 测试数据集（太大不上传）
+test_dataset/
+test_depth/
+
+# IDE
+.vscode/
+.idea/
+
+# 备份文件
+*_backup*.py
