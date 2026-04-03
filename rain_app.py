@@ -66,25 +66,102 @@ PRESETS = {
     '自定义': None,
     '毛毛雨': {
         'rain_rate': 2.0, 'wind_speed': 0.5, 'wind_direction': 315.0,
-        'exposure_time': 1/30, 'turbulence_deg': 1.0,
+        'exposure_time': 1/30, 'turbulence_deg': 1.0, 'dof_strength': 0.15,
     },
     '春雨': {
         'rain_rate': 10.0, 'wind_speed': 1.5, 'wind_direction': 350.0,
-        'exposure_time': 1/30, 'turbulence_deg': 2.0,
+        'exposure_time': 1/30, 'turbulence_deg': 2.0, 'dof_strength': 0.15,
     },
     '大雨': {
         'rain_rate': 35.0, 'wind_speed': 4.0, 'wind_direction': 330.0,
-        'exposure_time': 1/30, 'turbulence_deg': 3.5,
+        'exposure_time': 1/30, 'turbulence_deg': 3.5, 'dof_strength': 0.15,
     },
     '暴雨': {
         'rain_rate': 70.0, 'wind_speed': 8.0, 'wind_direction': 315.0,
-        'exposure_time': 1/25, 'turbulence_deg': 6.0,
+        'exposure_time': 1/25, 'turbulence_deg': 6.0, 'dof_strength': 0.15,
     },
     '台风': {
         'rain_rate': 120.0, 'wind_speed': 15.0, 'wind_direction': 270.0,
-        'exposure_time': 1/20, 'turbulence_deg': 10.0,
+        'exposure_time': 1/20, 'turbulence_deg': 10.0, 'dof_strength': 0.15,
     },
 }
+
+
+CITYSCAPES_IMAGE_DIR = os.path.join('leftImg8bit_trainvaltest', 'leftImg8bit')
+CITYSCAPES_DEPTH_DIR = os.path.join('depth_trainvaltest', 'depth')
+CITYSCAPES_CAMERA_DIR = os.path.join('camera_trainvaltest', 'camera')
+CITYSCAPES_IMAGE_SUFFIX = '_leftImg8bit'
+
+
+def _strip_cityscapes_suffix(stem: str) -> str:
+    for suffix in (
+        '_leftImg8bit', '_rightImg8bit', '_disparity', '_depth', '_camera'
+    ):
+        if stem.endswith(suffix):
+            return stem[:-len(suffix)]
+    return stem
+
+
+def _resolve_cityscapes_roots(base_path: str):
+    """解析 Cityscapes 根目录，也兼容直接选到 image/depth/camera 子目录。"""
+    if not base_path:
+        return None
+
+    norm_base = os.path.normpath(base_path)
+    candidates = [norm_base]
+
+    parent = os.path.dirname(norm_base)
+    grand = os.path.dirname(parent)
+    tail = os.path.normcase(os.path.basename(norm_base))
+    parent_tail = os.path.normcase(os.path.basename(parent))
+
+    if tail == os.path.normcase('leftImg8bit') and parent_tail == os.path.normcase('leftImg8bit_trainvaltest'):
+        candidates.append(grand)
+    if tail == os.path.normcase('depth') and parent_tail == os.path.normcase('depth_trainvaltest'):
+        candidates.append(grand)
+    if tail == os.path.normcase('camera') and parent_tail == os.path.normcase('camera_trainvaltest'):
+        candidates.append(grand)
+
+    for candidate in candidates:
+        image_root = os.path.join(candidate, CITYSCAPES_IMAGE_DIR)
+        depth_root = os.path.join(candidate, CITYSCAPES_DEPTH_DIR)
+        camera_root = os.path.join(candidate, CITYSCAPES_CAMERA_DIR)
+        if all(os.path.isdir(p) for p in (image_root, depth_root, camera_root)):
+            return os.path.normpath(candidate), image_root, depth_root, camera_root
+
+    return None
+
+
+def _list_cityscapes_images(image_root: str):
+    pattern = os.path.join(image_root, '**', f'*{CITYSCAPES_IMAGE_SUFFIX}.png')
+    return sorted(glob.glob(pattern, recursive=True))
+
+
+def _resolve_cityscapes_sample_paths(
+    dataset_root: str,
+    image_path: str,
+):
+    roots = _resolve_cityscapes_roots(dataset_root)
+    if roots is None:
+        return None, None, None
+
+    _, image_root, depth_root, camera_root = roots
+    rel_dir = os.path.relpath(os.path.dirname(image_path), image_root)
+    if rel_dir == '.':
+        rel_dir = ''
+
+    basename = os.path.splitext(os.path.basename(image_path))[0]
+    stem = _strip_cityscapes_suffix(basename)
+
+    depth_path = os.path.join(depth_root, rel_dir, f'{stem}_depth.png')
+    camera_path = os.path.join(camera_root, rel_dir, f'{stem}_camera.json')
+
+    if not os.path.isfile(depth_path):
+        depth_path = None
+    if not os.path.isfile(camera_path):
+        camera_path = None
+
+    return image_root, depth_path, camera_path
 
 
 # ===========================================================================
@@ -105,6 +182,63 @@ class RenderThread(QThread):
             self.finished.emit(mask)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class BatchRenderThread(QThread):
+    progress = pyqtSignal(int, int, str)  # current, total, filename
+    batch_finished = pyqtSignal(int)       # total count
+    batch_error = pyqtSignal(str)          # fatal error
+
+    def __init__(self, depth_files, output_dir, params):
+        super().__init__()
+        self.depth_files = depth_files
+        self.output_dir = output_dir
+        self.params = params
+
+    def run(self):
+        try:
+            total = len(self.depth_files)
+            for idx, dpath in enumerate(self.depth_files):
+                filename = os.path.basename(dpath)
+                out_name = filename.replace('_depth', '_rain_mask')
+                if out_name == filename:
+                    base, ext = os.path.splitext(filename)
+                    out_name = f'{base}_rain_mask{ext}'
+                out_path = os.path.join(self.output_dir, out_name)
+
+                seed = self.params.get('seed')
+                img_seed = (seed + idx) if seed is not None else None
+
+                try:
+                    mask = render_rain_mask(
+                        depth_path=dpath,
+                        rain_rate=self.params['rain_rate'],
+                        wind_speed=self.params['wind_speed'],
+                        wind_direction=self.params['wind_direction'],
+                        exposure_time=self.params['exposure_time'],
+                        turbulence_deg=self.params['turbulence_deg'],
+                        focus_distance=self.params['focus_distance'],
+                        dof_strength=self.params['dof_strength'],
+                        depth_scale=self.params['depth_scale'],
+                        focal_length=self.params['focal_length'],
+                        sensor_width=self.params['sensor_width'],
+                        sensor_height=self.params['sensor_height'],
+                        image_width=self.params['image_width'],
+                        image_height=self.params['image_height'],
+                        cam_height=self.params['cam_height'],
+                        cam_pitch=self.params['cam_pitch'],
+                        seed=img_seed,
+                    )
+                    cv2.imencode('.png', mask)[1].tofile(out_path)
+                except Exception as e:
+                    self.progress.emit(idx + 1, total, f'{filename} 失败: {e}')
+                    continue
+
+                self.progress.emit(idx + 1, total, f'{idx+1} / {total}')
+
+            self.batch_finished.emit(total)
+        except Exception as e:
+            self.batch_error.emit(str(e))
 
 
 # ===========================================================================
@@ -591,6 +725,114 @@ class InfoBar(QWidget):
 
 
 # ===========================================================================
+# 大图预览对话框
+# ===========================================================================
+
+class ImagePreviewDialog(QWidget):
+    """
+    全屏/大窗口图像预览，支持：
+    - 双击预览图打开
+    - 滚轮缩放
+    - 拖拽平移
+    - Escape / 双击关闭
+    """
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent, Qt.Window | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setStyleSheet(f'background-color: rgba(0, 0, 0, 0.95);')
+        self.setCursor(Qt.OpenHandCursor)
+
+        self._pixmap = pixmap
+        self._scale = 1.0
+        self._offset = QPoint(0, 0)
+        self._drag_start = None
+        self._drag_offset = None
+
+        # 全屏显示
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen)
+
+        # 初始缩放：适配屏幕
+        sw, sh = screen.width() * 0.9, screen.height() * 0.9
+        pw, ph = pixmap.width(), pixmap.height()
+        self._scale = min(sw / pw, sh / ph, 3.0)
+
+        # 提示标签
+        self._hint = QLabel('滚轮缩放  |  拖拽平移  |  Esc / 双击关闭', self)
+        self._hint.setAlignment(Qt.AlignCenter)
+        self._hint.setStyleSheet(f'''
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 13px;
+            background: transparent;
+        ''')
+        self._hint.setGeometry(0, self.height() - 40, self.width(), 30)
+
+        # 3秒后隐藏提示
+        QTimer.singleShot(3000, self._hint.hide)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        # 计算缩放后的图像尺寸和位置（居中）
+        pw = int(self._pixmap.width() * self._scale)
+        ph = int(self._pixmap.height() * self._scale)
+        x = (self.width() - pw) // 2 + self._offset.x()
+        y = (self.height() - ph) // 2 + self._offset.y()
+
+        scaled = self._pixmap.scaled(pw, ph, Qt.KeepAspectRatio,
+                                     Qt.SmoothTransformation)
+        p.drawPixmap(x, y, scaled)
+
+        # 右上角显示缩放比例
+        p.setPen(QColor(255, 255, 255, 120))
+        p.setFont(QFont('Segoe UI', 11))
+        p.drawText(self.width() - 100, 30, f'{self._scale:.0%}')
+        p.end()
+
+    def wheelEvent(self, e):
+        delta = e.angleDelta().y()
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        new_scale = self._scale * factor
+        new_scale = max(0.1, min(new_scale, 10.0))
+        self._scale = new_scale
+        self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag_start = e.pos()
+            self._drag_offset = QPoint(self._offset)
+            self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_start:
+            delta = e.pos() - self._drag_start
+            self._offset = self._drag_offset + delta
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        self._drag_start = None
+        self.setCursor(Qt.OpenHandCursor)
+
+    def mouseDoubleClickEvent(self, e):
+        self.close()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.close()
+        elif e.key() == Qt.Key_Plus or e.key() == Qt.Key_Equal:
+            self._scale = min(self._scale * 1.2, 10.0)
+            self.update()
+        elif e.key() == Qt.Key_Minus:
+            self._scale = max(self._scale / 1.2, 0.1)
+            self.update()
+        elif e.key() == Qt.Key_0:
+            self._scale = 1.0
+            self._offset = QPoint(0, 0)
+            self.update()
+
+
+# ===========================================================================
 # 页面：渲染参数
 # ===========================================================================
 
@@ -682,8 +924,10 @@ class RenderParamsPage(QScrollArea):
         # 光学参数卡片
         optics_card = AppleCard('光学')
         self.focus_dist = AppleSliderRow('对焦距离', 1.0, 100.0, 12.0, 0.5, 1, ' m')
+        self.dof_strength = AppleSliderRow('景深强度', 0.0, 1.0, 0.15, 0.01, 2, '')
         self.depth_scale = AppleSliderRow('场景深度', 10.0, 500.0, 100.0, 1.0, 0, ' m')
         optics_card.addRow(self.focus_dist)
+        optics_card.addRow(self.dof_strength)
         optics_card.addRow(self.depth_scale)
         layout.addWidget(optics_card)
 
@@ -717,6 +961,7 @@ class RenderParamsPage(QScrollArea):
             font-size: 14px;
         ''')
         self.preview_label.setText('点击「渲染」生成预览')
+        self.preview_label.setCursor(Qt.PointingHandCursor)
         preview_layout.addWidget(self.preview_label, stretch=1)
 
         self.stats_label = QLabel('')
@@ -990,7 +1235,7 @@ class OutputPage(QScrollArea):
         w_lay.addStretch()
         self.out_width = QSpinBox()
         self.out_width.setRange(64, 4096)
-        self.out_width.setValue(512)
+        self.out_width.setValue(2048)
         self.out_width.setSuffix(' px')
         self.out_width.setFixedWidth(120)
         self.out_width.setStyleSheet(spinbox_style)
@@ -1008,7 +1253,7 @@ class OutputPage(QScrollArea):
         h_lay.addStretch()
         self.out_height = QSpinBox()
         self.out_height.setRange(64, 4096)
-        self.out_height.setValue(512)
+        self.out_height.setValue(1024)
         self.out_height.setSuffix(' px')
         self.out_height.setFixedWidth(120)
         self.out_height.setStyleSheet(spinbox_style)
@@ -1024,7 +1269,7 @@ class OutputPage(QScrollArea):
         lock_lbl.setStyleSheet(f'color: {AppleColors.TEXT}; font-size: 15px;')
         lock_lay.addWidget(lock_lbl)
         lock_lay.addStretch()
-        self.lock_toggle = AppleToggle(True)
+        self.lock_toggle = AppleToggle(False)
         lock_lay.addWidget(self.lock_toggle)
         size_card.addRow(lock_row)
 
@@ -1102,6 +1347,13 @@ class BatchPage(QScrollArea):
         input_lay = QHBoxLayout(input_row)
         input_lay.setContentsMargins(16, 0, 16, 0)
         self.batch_dir_edit = QLineEdit()
+        # 默认指向 Cityscapes 深度图目录
+        default_depth_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'dataset', CITYSCAPES_DEPTH_DIR,
+        )
+        if os.path.isdir(default_depth_dir):
+            self.batch_dir_edit.setText(default_depth_dir)
         self.batch_dir_edit.setPlaceholderText('选择深度图目录...')
         self.batch_dir_edit.setStyleSheet(line_edit_style)
         input_lay.addWidget(self.batch_dir_edit)
@@ -1118,7 +1370,11 @@ class BatchPage(QScrollArea):
         output_row.setFixedHeight(52)
         output_lay = QHBoxLayout(output_row)
         output_lay.setContentsMargins(16, 0, 16, 0)
-        self.batch_out_edit = QLineEdit('rain_masks')
+        default_output_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'dataset', 'rain_masks',
+        )
+        self.batch_out_edit = QLineEdit(default_output_dir)
         self.batch_out_edit.setPlaceholderText('输出目录...')
         self.batch_out_edit.setStyleSheet(line_edit_style)
         output_lay.addWidget(self.batch_out_edit)
@@ -1178,7 +1434,14 @@ class RainRendererApp(QMainWindow):
 
         self.current_mask = None
         self.render_thread = None
+        self.batch_thread = None
         self.depth_path = None
+        self.live_preview_timer = QTimer(self)
+        self.live_preview_timer.setSingleShot(True)
+        self.live_preview_timer.setInterval(120)
+        self.live_preview_timer.timeout.connect(self._trigger_live_preview)
+        self._queued_live_preview = False
+        self._active_render_show_toast = True
 
         self._init_ui()
         self._connect_signals()
@@ -1259,8 +1522,11 @@ class RainRendererApp(QMainWindow):
         self.sidebar.preset_combo.currentTextChanged.connect(self._on_preset)
 
         # 渲染/保存
-        self.render_page.render_btn.clicked.connect(self._on_render)
+        self.render_page.render_btn.clicked.connect(self._on_manual_render)
         self.render_page.save_btn.clicked.connect(self._on_save)
+
+        # 预览大图（双击）
+        self.render_page.preview_label.mouseDoubleClickEvent = self._on_preview_dblclick
 
         # 深度图
         self.depth_page.use_depth_toggle.toggled.connect(self._on_depth_toggle)
@@ -1278,7 +1544,71 @@ class RainRendererApp(QMainWindow):
         self.batch_page.batch_out_btn.clicked.connect(self._browse_batch_out)
         self.batch_page.batch_btn.clicked.connect(self._on_batch_render)
 
+        # 实时预览
+        live_controls = [
+            self.render_page.rain_rate.slider,
+            self.render_page.wind_speed.slider,
+            self.render_page.wind_dir_fine.slider,
+            self.render_page.exposure.slider,
+            self.render_page.turbulence.slider,
+            self.render_page.focus_dist.slider,
+            self.render_page.dof_strength.slider,
+            self.render_page.depth_scale.slider,
+            self.camera_page.focal_length.slider,
+            self.camera_page.sensor_w.slider,
+            self.camera_page.sensor_h.slider,
+            self.camera_page.cam_height.slider,
+            self.camera_page.cam_pitch.slider,
+            self.output_page.out_width,
+            self.output_page.out_height,
+            self.output_page.seed_spin,
+        ]
+        for control in live_controls:
+            control.valueChanged.connect(self._schedule_live_preview)
+
+        self.render_page.wind_dir_combo.currentIndexChanged.connect(
+            self._schedule_live_preview
+        )
+        self.depth_page.depth_mode_combo.currentTextChanged.connect(
+            self._schedule_live_preview
+        )
+
     # ---- 事件处理 ----
+
+    def _schedule_live_preview(self, *_):
+        self._queued_live_preview = True
+        self.live_preview_timer.start()
+
+    def _trigger_live_preview(self):
+        if not self._queued_live_preview:
+            return
+        if self.render_thread and self.render_thread.isRunning():
+            return
+        self._queued_live_preview = False
+        self._start_render(show_toast=False)
+
+    def _on_manual_render(self):
+        self._queued_live_preview = False
+        self.live_preview_timer.stop()
+        self._start_render(show_toast=True)
+
+    def _start_render(self, show_toast=True):
+        if self.render_thread and self.render_thread.isRunning():
+            return
+
+        params = self._get_render_params()
+        self._active_render_show_toast = show_toast
+
+        self.render_page.render_btn.setEnabled(False)
+        self.render_page.render_btn.setText('渲染中...')
+
+        if not show_toast:
+            self.render_page.stats_label.setText('实时预览更新中...')
+
+        self.render_thread = RenderThread(params)
+        self.render_thread.finished.connect(self._on_render_done)
+        self.render_thread.error.connect(self._on_render_error)
+        self.render_thread.start()
 
     def _on_preset(self, name):
         preset = PRESETS.get(name)
@@ -1290,6 +1620,7 @@ class RainRendererApp(QMainWindow):
         p.wind_dir_fine.setValue(preset['wind_direction'])
         p.exposure.setValue(preset['exposure_time'])
         p.turbulence.setValue(preset['turbulence_deg'])
+        p.dof_strength.setValue(preset.get('dof_strength', 0.15))
 
     def _on_depth_toggle(self, checked):
         self.depth_page.file_card.setEnabled(checked)
@@ -1297,20 +1628,24 @@ class RainRendererApp(QMainWindow):
         can_set_size = not checked
         self.output_page.out_width.setEnabled(can_set_size)
         self.output_page.out_height.setEnabled(can_set_size)
+        self._schedule_live_preview()
 
     def _on_cam_toggle(self, checked):
         self.camera_page.intrinsic_card.setEnabled(checked)
         self.camera_page.extrinsic_card.setEnabled(checked)
+        self._schedule_live_preview()
 
     def _on_lock_ratio(self, checked):
         if checked:
             self.output_page.out_height.setValue(self.output_page.out_width.value())
+        self._schedule_live_preview()
 
     def _on_width_changed(self, val):
         if self.output_page.lock_toggle.isChecked():
             self.output_page.out_height.blockSignals(True)
             self.output_page.out_height.setValue(val)
             self.output_page.out_height.blockSignals(False)
+        self._schedule_live_preview()
 
     def _browse_depth(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1321,12 +1656,24 @@ class RainRendererApp(QMainWindow):
             self.depth_path = path
             self.depth_page.depth_path_edit.setText(path)
             self._show_depth_preview(path)
+            self._schedule_live_preview()
 
     def _show_depth_preview(self, path):
         try:
             raw = np.fromfile(path, dtype=np.uint8)
-            img = cv2.imdecode(raw, cv2.IMREAD_GRAYSCALE)
+            img = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED)
             if img is not None:
+                if img.ndim == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                # 16-bit 深度图归一化到 0-255 用于预览
+                if img.dtype == np.uint16:
+                    valid = img[img > 0]
+                    if valid.size > 0:
+                        max_val = np.percentile(valid, 99)
+                        img = np.clip(img.astype(np.float32) / max(max_val, 1), 0, 1)
+                        img = (img * 255).astype(np.uint8)
+                    else:
+                        img = np.zeros(img.shape, dtype=np.uint8)
                 h, w = img.shape
                 scale = min(240 / w, 160 / h)
                 new_w, new_h = int(w * scale), int(h * scale)
@@ -1361,6 +1708,7 @@ class RainRendererApp(QMainWindow):
             'exposure_time': rp.exposure.value(),
             'turbulence_deg': rp.turbulence.value(),
             'focus_distance': rp.focus_dist.value(),
+            'dof_strength': rp.dof_strength.value(),
             'depth_scale': rp.depth_scale.value(),
             'image_width': op.out_width.value(),
             'image_height': op.out_height.value(),
@@ -1390,20 +1738,6 @@ class RainRendererApp(QMainWindow):
         params['seed'] = seed_val if seed_val >= 0 else None
         return params
 
-    def _on_render(self):
-        if self.render_thread and self.render_thread.isRunning():
-            return
-
-        params = self._get_render_params()
-
-        self.render_page.render_btn.setEnabled(False)
-        self.render_page.render_btn.setText('渲染中...')
-
-        self.render_thread = RenderThread(params)
-        self.render_thread.finished.connect(self._on_render_done)
-        self.render_thread.error.connect(self._on_render_error)
-        self.render_thread.start()
-
     def _on_render_done(self, mask):
         self.current_mask = mask
         self._display_mask(mask)
@@ -1423,23 +1757,36 @@ class RainRendererApp(QMainWindow):
         self.render_page.render_btn.setText('渲染')
         self.render_page.save_btn.setEnabled(True)
 
-        self._show_info_bar('渲染完成', 'success')
+        if self._active_render_show_toast:
+            self._show_info_bar('渲染完成', 'success')
+        if self._queued_live_preview:
+            self.live_preview_timer.start(1)
 
     def _on_render_error(self, err):
         self.render_page.render_btn.setEnabled(True)
         self.render_page.render_btn.setText('渲染')
-        self._show_info_bar(f'渲染失败: {err}', 'error')
+        if self._active_render_show_toast:
+            self._show_info_bar(f'渲染失败: {err}', 'error')
+        else:
+            self.render_page.stats_label.setText(f'实时预览失败: {err}')
+        if self._queued_live_preview:
+            self.live_preview_timer.start(1)
 
     def _display_mask(self, mask):
         h, w = mask.shape
         rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
         bytes_per_line = w * 3
         qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        self._full_pixmap = QPixmap.fromImage(qimg).copy()
         label = self.render_page.preview_label
-        pixmap = QPixmap.fromImage(qimg)
-        scaled = pixmap.scaled(label.size(), Qt.KeepAspectRatio,
-                               Qt.SmoothTransformation)
+        scaled = self._full_pixmap.scaled(label.size(), Qt.KeepAspectRatio,
+                                          Qt.SmoothTransformation)
         label.setPixmap(scaled)
+
+    def _on_preview_dblclick(self, event):
+        if self.current_mask is not None and hasattr(self, '_full_pixmap'):
+            dialog = ImagePreviewDialog(self._full_pixmap, self)
+            dialog.showFullScreen()
 
     def _on_save(self):
         if self.current_mask is None:
@@ -1449,8 +1796,14 @@ class RainRendererApp(QMainWindow):
             'PNG (*.png);;JPEG (*.jpg);;BMP (*.bmp);;所有文件 (*)'
         )
         if path:
-            cv2.imwrite(path, self.current_mask)
-            self._show_info_bar(f'已保存到 {os.path.basename(path)}', 'success')
+            # cv2.imwrite 不支持中文路径，用 imencode + tofile 替代
+            ext = os.path.splitext(path)[1] if os.path.splitext(path)[1] else '.png'
+            ok, buf = cv2.imencode(ext, self.current_mask)
+            if ok:
+                buf.tofile(path)
+                self._show_info_bar(f'已保存到 {os.path.basename(path)}', 'success')
+            else:
+                self._show_info_bar('保存失败：编码错误', 'error')
 
     def _on_batch_render(self):
         depth_dir = self.batch_page.batch_dir_edit.text().strip()
@@ -1460,9 +1813,9 @@ class RainRendererApp(QMainWindow):
             self._show_info_bar('请选择有效的深度图目录', 'error')
             return
 
-        depth_files = sorted(glob.glob(os.path.join(depth_dir, '*_depth.png')))
+        depth_files = sorted(glob.glob(os.path.join(depth_dir, '**', '*_depth.png'), recursive=True))
         if not depth_files:
-            depth_files = sorted(glob.glob(os.path.join(depth_dir, '*.png')))
+            depth_files = sorted(glob.glob(os.path.join(depth_dir, '**', '*.png'), recursive=True))
         if not depth_files:
             self._show_info_bar('目录中没有找到深度图', 'warning')
             return
@@ -1477,43 +1830,27 @@ class RainRendererApp(QMainWindow):
 
         params = self._get_render_params()
 
-        for idx, dpath in enumerate(depth_files):
-            filename = os.path.basename(dpath)
-            out_name = filename.replace('_depth', '_rain_mask')
-            if out_name == filename:
-                base, ext = os.path.splitext(filename)
-                out_name = f'{base}_rain_mask{ext}'
-            out_path = os.path.join(output_dir, out_name)
+        self._batch_output_dir = output_dir
+        self.batch_thread = BatchRenderThread(depth_files, output_dir, params)
+        self.batch_thread.progress.connect(self._on_batch_progress)
+        self.batch_thread.batch_finished.connect(self._on_batch_done)
+        self.batch_thread.batch_error.connect(self._on_batch_fatal)
+        self.batch_thread.start()
 
-            seed = params.get('seed')
-            img_seed = (seed + idx) if seed is not None else None
+    def _on_batch_progress(self, current, total, text):
+        bp = self.batch_page
+        bp.progress_bar.setValue(current)
+        bp.progress_label.setText(text)
 
-            try:
-                mask = render_rain_mask(
-                    depth_path=dpath,
-                    rain_rate=params['rain_rate'],
-                    wind_speed=params['wind_speed'],
-                    wind_direction=params['wind_direction'],
-                    exposure_time=params['exposure_time'],
-                    turbulence_deg=params['turbulence_deg'],
-                    depth_scale=params['depth_scale'],
-                    focal_length=params['focal_length'],
-                    sensor_width=params['sensor_width'],
-                    sensor_height=params['sensor_height'],
-                    seed=img_seed,
-                )
-                cv2.imwrite(out_path, mask)
-            except Exception as e:
-                bp.progress_label.setText(f'{filename} 失败: {e}')
-
-            bp.progress_bar.setValue(idx + 1)
-            bp.progress_label.setText(f'{idx+1} / {len(depth_files)}')
-            QApplication.processEvents()
-
-        bp.batch_btn.setEnabled(True)
+    def _on_batch_done(self, total):
+        self.batch_page.batch_btn.setEnabled(True)
         self._show_info_bar(
-            f'批量完成: {len(depth_files)} 张 -> {output_dir}', 'success'
+            f'批量完成: {total} 张 -> {self._batch_output_dir}', 'success'
         )
+
+    def _on_batch_fatal(self, err):
+        self.batch_page.batch_btn.setEnabled(True)
+        self._show_info_bar(f'批量渲染失败: {err}', 'error')
 
     def _show_info_bar(self, text, bar_type='info'):
         bar = InfoBar(text, bar_type, self)

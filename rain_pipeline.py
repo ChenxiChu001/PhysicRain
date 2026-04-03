@@ -99,6 +99,68 @@ def base64_to_image(b64_str: str) -> np.ndarray:
     return img
 
 
+def _strip_known_stem_suffix(stem: str) -> str:
+    for suffix in ('_leftImg8bit', '_rightImg8bit', '_disparity', '_depth', '_camera'):
+        if stem.endswith(suffix):
+            return stem[:-len(suffix)]
+    return stem
+
+
+def _resolve_cityscapes_relative_dir(image_dir: str, img_path: str) -> str:
+    rel_dir = os.path.relpath(os.path.dirname(img_path), image_dir)
+    return '' if rel_dir == '.' else rel_dir
+
+
+def _find_depth_and_camera(
+    img_path: str,
+    image_dir: str,
+    depth_dir: str,
+    camera_dir: str = None,
+):
+    basename = os.path.splitext(os.path.basename(img_path))[0]
+    stem = _strip_known_stem_suffix(basename)
+    rel_dir = _resolve_cityscapes_relative_dir(image_dir, img_path)
+
+    depth_candidates = []
+    for ext in ('.png', '.jpg'):
+        depth_candidates.extend([
+            f'{basename}_depth{ext}',
+            f'{basename}{ext}',
+            f'{stem}_depth{ext}',
+            f'{stem}_disparity_depth{ext}',
+        ])
+
+    depth_path = None
+    for name in depth_candidates:
+        candidate = os.path.join(depth_dir, rel_dir, name)
+        if os.path.isfile(candidate):
+            depth_path = candidate
+            break
+        candidate = os.path.join(depth_dir, name)
+        if os.path.isfile(candidate):
+            depth_path = candidate
+            break
+
+    camera_json_path = None
+    if camera_dir:
+        camera_candidates = [
+            f'{stem}_camera.json',
+            f'{basename}_camera.json',
+            f'{basename}.json',
+        ]
+        for name in camera_candidates:
+            candidate = os.path.join(camera_dir, rel_dir, name)
+            if os.path.isfile(candidate):
+                camera_json_path = candidate
+                break
+            candidate = os.path.join(camera_dir, name)
+            if os.path.isfile(candidate):
+                camera_json_path = candidate
+                break
+
+    return depth_path, camera_json_path
+
+
 # ===========================================================================
 # Gemini API 调用
 # ===========================================================================
@@ -237,6 +299,13 @@ def call_gemini_image_edit(
             if attempt <= max_retries:
                 time.sleep(5)
 
+        except (requests.exceptions.ProxyError,
+                requests.exceptions.ConnectionError) as e:
+            # 代理/连接错误：本地网络问题，重试无意义，直接放弃
+            last_error = f'代理/连接错误: {e}'
+            print(f' 代理断开')
+            raise RuntimeError(f'代理连接失败 (不重试): {e}')
+
         except Exception as e:
             last_error = str(e)
             print(f' 异常: {last_error}')
@@ -306,7 +375,7 @@ class Counter:
 # ===========================================================================
 
 def _process_single_image(
-    idx, total, img_path, depth_dir, output_dir,
+    idx, total, img_path, image_dir, depth_dir, camera_dir, output_dir,
     key_pool, rain_params, prompt, api_url, model,
     timeout, seed, skip_existing, mask_output_dir, counter,
     print_lock,
@@ -325,16 +394,13 @@ def _process_single_image(
         counter.inc_skip()
         return
 
-    # 1. 查找深度图
-    depth_path = None
-    for ext in ['.png', '.jpg']:
-        for pattern in [f'{basename}_depth{ext}', f'{basename}{ext}']:
-            candidate = os.path.join(depth_dir, pattern)
-            if os.path.isfile(candidate):
-                depth_path = candidate
-                break
-        if depth_path:
-            break
+    # 1. 查找深度图 / 相机参数
+    depth_path, camera_json_path = _find_depth_and_camera(
+        img_path=img_path,
+        image_dir=image_dir,
+        depth_dir=depth_dir,
+        camera_dir=camera_dir,
+    )
 
     # 2. 生成掩码
     img_seed = seed + idx if seed is not None else None
@@ -345,6 +411,7 @@ def _process_single_image(
 
         mask = render_rain_mask(
             depth_path=depth_path,
+            camera_json_path=camera_json_path,
             rain_rate=rain_params['rain_rate'],
             wind_speed=rain_params['wind_speed'],
             wind_angle=rain_params.get('wind_angle', 30.0),
@@ -404,6 +471,7 @@ def batch_synthesize(
     depth_dir: str,
     output_dir: str,
     api_keys,
+    camera_dir: str = None,
     rain_rate: float = 70.0,
     wind_speed: float = 8.0,
     wind_angle: float = 30.0,
@@ -443,8 +511,8 @@ def batch_synthesize(
         os.makedirs(mask_output_dir, exist_ok=True)
 
     image_files = sorted(
-        glob.glob(os.path.join(image_dir, '*.png')) +
-        glob.glob(os.path.join(image_dir, '*.jpg'))
+        glob.glob(os.path.join(image_dir, '**', '*.png'), recursive=True) +
+        glob.glob(os.path.join(image_dir, '**', '*.jpg'), recursive=True)
     )
     if not image_files:
         print(f'[错误] 在 {image_dir} 中未找到图像文件')
@@ -465,6 +533,8 @@ def batch_synthesize(
     print('=' * 60)
     print(f'图像目录:      {image_dir} ({len(image_files)} 张)')
     print(f'深度图目录:    {depth_dir}')
+    if camera_dir:
+        print(f'相机目录:      {camera_dir}')
     print(f'输出目录:      {output_dir}')
     print(f'降雨量:        {rain_rate} mm/h ({rain_desc})')
     print(f'API Keys:      {len(api_keys)} 个')
@@ -482,7 +552,8 @@ def batch_synthesize(
         # 单线程模式
         for idx, img_path in enumerate(image_files):
             _process_single_image(
-                idx, total, img_path, depth_dir, output_dir,
+                idx, total, img_path,
+                image_dir, depth_dir, camera_dir, output_dir,
                 key_pool, rain_params, prompt, api_url, model,
                 timeout, seed, skip_existing, mask_output_dir,
                 counter, print_lock,
@@ -494,7 +565,7 @@ def batch_synthesize(
             for idx, img_path in enumerate(image_files):
                 f = executor.submit(
                     _process_single_image,
-                    idx, total, img_path, depth_dir, output_dir,
+                    idx, total, img_path, image_dir, depth_dir, camera_dir, output_dir,
                     key_pool, rain_params, prompt, api_url, model,
                     timeout, seed, skip_existing, mask_output_dir,
                     counter, print_lock,
@@ -544,6 +615,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--image_dir', required=True, help='原始晴天图像目录')
     parser.add_argument('--depth_dir', required=True, help='深度图目录')
+    parser.add_argument('--camera_dir', default=None, help='相机标定目录 (Cityscapes camera)')
     parser.add_argument('--output_dir', default='rain_output', help='合成结果输出目录')
     parser.add_argument('--api_keys', nargs='+', required=True,
                         help='API 密钥 (支持多个，空格分隔)')
@@ -574,6 +646,7 @@ if __name__ == '__main__':
     batch_synthesize(
         image_dir=args.image_dir,
         depth_dir=args.depth_dir,
+        camera_dir=args.camera_dir,
         output_dir=args.output_dir,
         api_keys=args.api_keys,
         rain_rate=args.rain_rate,

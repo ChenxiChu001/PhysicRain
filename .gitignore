@@ -13,10 +13,13 @@ test_masks/
 test/
 rain_masks/
 rain_output/
+batch_test_masks/
+batch_test_output/
 
 # 测试数据集（太大不上传）
 test_dataset/
 test_depth/
+dataset/
 
 # IDE
 .vscode/

@@ -48,6 +48,7 @@ import numpy as np
 import cv2
 import os
 import glob
+import json
 from dataclasses import dataclass
 from typing import Tuple, Optional
 
@@ -68,12 +69,26 @@ class CameraParams:
     focal_length: float = 35.0       # 焦距 (mm)，典型街景/监控镜头
     sensor_width: float = 36.0       # 传感器宽度 (mm)，全画幅 35mm
     sensor_height: float = 24.0      # 传感器高度 (mm)，全画幅 35mm (3:2)
-    image_width: int = 512           # 输出图像宽度 (像素)
-    image_height: int = 512          # 输出图像高度 (像素)
+    image_width: int = 2048          # 输出图像宽度 (像素)
+    image_height: int = 1024         # 输出图像高度 (像素)
     exposure_time: float = 1.0/30.0  # 曝光时间 (秒)，1/30s 模拟普通摄像头
+    fx_px: Optional[float] = None    # 焦距 fx (像素)
+    fy_px: Optional[float] = None    # 焦距 fy (像素)
+    cx_px: Optional[float] = None    # 主点 cx (像素)
+    cy_px: Optional[float] = None    # 主点 cy (像素)
     # 相机外参 (位姿)
     cam_height: float = 1.6          # 相机离地高度 (米)
     cam_pitch: float = 0.0           # 俯仰角 (度)，正值向下看
+
+    def __post_init__(self):
+        if self.fx_px is None:
+            self.fx_px = (self.focal_length * self.image_width) / self.sensor_width
+        if self.fy_px is None:
+            self.fy_px = (self.focal_length * self.image_height) / self.sensor_height
+        if self.cx_px is None:
+            self.cx_px = self.image_width / 2.0
+        if self.cy_px is None:
+            self.cy_px = self.image_height / 2.0
 
 
 @dataclass
@@ -132,6 +147,106 @@ WIND_DIRECTIONS = {
     'NW': 315, '西北': 315, '西北风': 315,
     'NNW': 337.5, '北偏西': 337.5,
 }
+
+
+def load_cityscapes_camera(camera_json_path: str) -> dict:
+    """
+    读取 Cityscapes camera json，并规范化为本项目使用的相机参数。
+
+    官方 README 说明：
+      - disparity 有效值解码为 d = (p - 1) / 256
+      - camera 文件提供内外参，细节见 csCalibration.pdf
+    """
+    with open(camera_json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    intrinsic = data.get('intrinsic', {})
+    extrinsic = data.get('extrinsic', {})
+
+    fx = intrinsic.get('fx', None)
+    if fx is None:
+        raise KeyError(f'Cityscapes camera JSON 缺少 intrinsic.fx: {camera_json_path}')
+
+    pitch = float(extrinsic.get('pitch', 0.0))
+    if abs(pitch) <= np.pi:
+        pitch_deg = float(np.degrees(pitch))
+    else:
+        pitch_deg = pitch
+
+    return {
+        'fx_px': float(fx),
+        'fy_px': float(intrinsic.get('fy', fx)),
+        'cx_px': float(intrinsic.get('u0', 0.0)),
+        'cy_px': float(intrinsic.get('v0', 0.0)),
+        'baseline_m': float(extrinsic.get('baseline', 0.0)),
+        'cam_height': float(extrinsic.get('z', extrinsic.get('x', 1.6))),
+        'cam_pitch': pitch_deg,
+        'yaw_deg': float(np.degrees(extrinsic.get('yaw', 0.0)))
+        if abs(float(extrinsic.get('yaw', 0.0))) <= np.pi
+        else float(extrinsic.get('yaw', 0.0)),
+        'roll_deg': float(np.degrees(extrinsic.get('roll', 0.0)))
+        if abs(float(extrinsic.get('roll', 0.0))) <= np.pi
+        else float(extrinsic.get('roll', 0.0)),
+    }
+
+
+def convert_cityscapes_disparity_to_depth(
+    disparity_path: str,
+    camera_json_path: str,
+    max_depth_m: Optional[float] = None,
+) -> np.ndarray:
+    """
+    按 Cityscapes 官方 README 的方法将 disparity 转换为深度图。
+
+    disparity 有效像素值 p > 0 时：
+      d = (p - 1) / 256
+      depth = baseline * fx / d
+    """
+    raw = np.fromfile(disparity_path, dtype=np.uint8)
+    disp_img = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED)
+    if disp_img is None:
+        raise FileNotFoundError(f'无法读取 disparity 图: {disparity_path}')
+    if disp_img.ndim == 3:
+        disp_img = cv2.cvtColor(disp_img, cv2.COLOR_BGR2GRAY)
+    if disp_img.ndim != 2:
+        raise ValueError(f'disparity 图必须是单通道: {disparity_path}')
+
+    camera = load_cityscapes_camera(camera_json_path)
+    baseline_m = camera['baseline_m']
+    fx_px = camera['fx_px']
+
+    disp_raw = disp_img.astype(np.float64)
+    valid = disp_raw > 0
+    disparity_px = np.zeros_like(disp_raw, dtype=np.float64)
+    disparity_px[valid] = (disp_raw[valid] - 1.0) / 256.0
+    valid = valid & (disparity_px > 0.0)
+
+    depth_m = np.zeros_like(disparity_px, dtype=np.float64)
+    depth_m[valid] = (baseline_m * fx_px) / disparity_px[valid]
+    # 无效像素 (disparity==0 或 d==0) 保持 0，由下游 load_and_process_depth 做空间插值
+    if max_depth_m is not None:
+        depth_m = np.clip(depth_m, 0.0, max_depth_m)
+    return depth_m
+
+
+def infer_cityscapes_camera_json_path(depth_path: Optional[str]) -> Optional[str]:
+    """根据转换后的 Cityscapes 深度图路径推断对应的 camera json 路径。"""
+    if not depth_path:
+        return None
+    norm_path = os.path.normpath(depth_path)
+    if not norm_path.endswith('_depth.png'):
+        return None
+
+    marker = os.path.join('depth_trainvaltest', 'depth')
+    if marker not in norm_path:
+        return None
+
+    camera_path = norm_path.replace(
+        marker,
+        os.path.join('camera_trainvaltest', 'camera'),
+    ).replace('_depth.png', '_camera.json')
+
+    return camera_path if os.path.isfile(camera_path) else None
 
 
 def parse_wind_direction(direction) -> float:
@@ -377,7 +492,7 @@ def generate_default_depth_map(width: int, height: int,
 
 
 def load_and_process_depth(depth_path: str,
-                           target_size: Tuple[int, int] = (512, 512),
+                           target_size: Tuple[int, int] = (2048, 1024),
                            depth_scale: float = 100.0,
                            min_depth: float = 1.0) -> np.ndarray:
     """
@@ -396,13 +511,40 @@ def load_and_process_depth(depth_path: str,
     """
     # 使用 numpy 读取文件字节再解码，以支持中文路径
     raw = np.fromfile(depth_path, dtype=np.uint8)
-    depth_img = cv2.imdecode(raw, cv2.IMREAD_GRAYSCALE)
+    depth_img = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED)
     if depth_img is None:
         raise FileNotFoundError(f"无法读取深度图: {depth_path}")
+
+    if depth_img.ndim == 3:
+        depth_img = cv2.cvtColor(depth_img, cv2.COLOR_BGR2GRAY)
 
     if depth_img.shape[:2] != (target_size[1], target_size[0]):
         depth_img = cv2.resize(depth_img, target_size,
                                interpolation=cv2.INTER_LINEAR)
+
+    # 16-bit 高精度深度图：约定保存为厘米 (cm)，0 表示无效
+    if depth_img.dtype == np.uint16 and depth_img.max() > 255:
+        depth_meters = depth_img.astype(np.float64) / 100.0
+        invalid = depth_meters <= 0.0
+        if np.any(invalid):
+            # 用空间插值填充无效区域（天空取邻近远距值，近处遮挡取邻近近距值）
+            valid_vals = depth_meters[~invalid]
+            if valid_vals.size > 0:
+                # cv2.inpaint 需要 uint8/uint16 输入，将深度归一化到 uint16
+                d_max = valid_vals.max()
+                d_min = valid_vals.min()
+                d_range = max(d_max - d_min, 1e-3)
+                norm = ((depth_meters - d_min) / d_range * 65534 + 1).astype(np.uint16)
+                norm[invalid] = 0
+                inpaint_mask = invalid.astype(np.uint8) * 255
+                # Telea 算法，半径 5 像素
+                inpainted = cv2.inpaint(norm, inpaint_mask, 5, cv2.INPAINT_TELEA)
+                # 解码回米
+                depth_meters = (inpainted.astype(np.float64) - 1) / 65534 * d_range + d_min
+            else:
+                depth_meters[invalid] = depth_scale
+        depth_meters = np.clip(depth_meters, min_depth, depth_scale)
+        return depth_meters
 
     depth_normalized = depth_img.astype(np.float64) / 255.0
     depth_meters = depth_normalized * (depth_scale - min_depth) + min_depth
@@ -474,8 +616,8 @@ def sample_raindrops_efficient(rain_params: RainParams,
         dz = z_far - z_near
 
         # ---- 该层视锥体体积 ----
-        fov_w = camera.sensor_width / camera.focal_length * z_mid
-        fov_h = camera.sensor_height / camera.focal_length * z_mid
+        fov_w = (camera.image_width / camera.fx_px) * z_mid
+        fov_h = (camera.image_height / camera.fy_px) * z_mid
         layer_volume = fov_w * fov_h * dz
 
         # ---- 物理雨滴总数 ----
@@ -483,8 +625,7 @@ def sample_raindrops_efficient(rain_params: RainParams,
 
         # ---- 计算该层的平均条纹投影长度 ----
         # proj_scale = f * W_img / (z * W_sensor) [px/m]
-        proj_scale = (camera.focal_length * camera.image_width) / \
-                     (z_mid * camera.sensor_width)
+        proj_scale = camera.fx_px / z_mid
         vt_mean = terminal_velocity(D_mean)
         streak_len_mean = vt_mean * camera.exposure_time * proj_scale
 
@@ -542,8 +683,7 @@ def sample_raindrops_efficient(rain_params: RainParams,
         visible = depths < scene_depths
 
         # ---- 过滤不可分辨的条纹 (<1px) ----
-        proj_scales = (camera.focal_length * camera.image_width) / \
-                      (depths * camera.sensor_width)
+        proj_scales = camera.fx_px / depths
         vts = terminal_velocity(diameters)
         streak_lens = vts * camera.exposure_time * proj_scales
         resolvable = streak_lens >= 2.0
@@ -570,6 +710,7 @@ def sample_raindrops_efficient(rain_params: RainParams,
 
 
 def render_rain_mask(depth_path: Optional[str] = None,
+                     camera_json_path: Optional[str] = None,
                      rain_rate: float = 25.0,
                      wind_speed: float = 2.0,
                      wind_angle: float = 10.0,
@@ -579,10 +720,11 @@ def render_rain_mask(depth_path: Optional[str] = None,
                      focal_length: float = 35.0,
                      sensor_width: float = 36.0,
                      sensor_height: float = 24.0,
-                     image_width: int = 512,
-                     image_height: int = 512,
+                     image_width: int = 2048,
+                     image_height: int = 1024,
                      turbulence_deg: float = 2.5,
                      focus_distance: float = 12.0,
+                     dof_strength: float = 0.15,
                      depth_mode: str = 'gradient',
                      cam_height: float = 1.6,
                      cam_pitch: float = 0.0,
@@ -592,6 +734,7 @@ def render_rain_mask(depth_path: Optional[str] = None,
 
     Args:
         depth_path:      深度图文件路径，为 None 时使用默认生成的深度图
+        camera_json_path: Cityscapes 相机标定 json，可覆盖默认相机模型
         rain_rate:       降雨强度 R (mm/h)
         wind_speed:      水平风速 (m/s)
         wind_angle:      [旧接口] 风向角度 (度)，0° = 从左向右
@@ -607,6 +750,7 @@ def render_rain_mask(depth_path: Optional[str] = None,
         image_height:    输出图像高度 (像素)
         turbulence_deg:  湍流角度标准差 (度)
         focus_distance:  对焦距离 (米)，影响景深离焦效果
+        dof_strength:    景深强度，0=深景深，1=浅景深
         depth_mode:      默认深度图模式 ('gradient'/'uniform'/'radial')
         cam_height:      相机离地高度 (米)
         cam_pitch:       相机俯仰角 (度)
@@ -617,16 +761,38 @@ def render_rain_mask(depth_path: Optional[str] = None,
     if seed is not None:
         np.random.seed(seed)
 
-    camera = CameraParams(
-        exposure_time=exposure_time,
-        focal_length=focal_length,
-        sensor_width=sensor_width,
-        sensor_height=sensor_height,
-        image_width=image_width,
-        image_height=image_height,
-        cam_height=cam_height,
-        cam_pitch=cam_pitch,
-    )
+    camera_kwargs = {
+        'exposure_time': exposure_time,
+        'focal_length': focal_length,
+        'sensor_width': sensor_width,
+        'sensor_height': sensor_height,
+        'image_width': image_width,
+        'image_height': image_height,
+        'cam_height': cam_height,
+        'cam_pitch': cam_pitch,
+    }
+    if camera_json_path is None:
+        camera_json_path = infer_cityscapes_camera_json_path(depth_path)
+
+    if camera_json_path is not None and os.path.isfile(camera_json_path):
+        city_cam = load_cityscapes_camera(camera_json_path)
+        # Cityscapes 内参是按原始分辨率 (2048x1024) 标定的，
+        # 渲染到不同分辨率时必须等比缩放 fx/fy/cx/cy。
+        # 通过主点坐标推断原始分辨率（主点约在图像中心）。
+        orig_w = round(city_cam['cx_px'] * 2)
+        orig_h = round(city_cam['cy_px'] * 2)
+        scale_x = image_width / orig_w if orig_w > 0 else 1.0
+        scale_y = image_height / orig_h if orig_h > 0 else 1.0
+        camera_kwargs.update({
+            'fx_px': city_cam['fx_px'] * scale_x,
+            'fy_px': city_cam['fy_px'] * scale_y,
+            'cx_px': city_cam['cx_px'] * scale_x,
+            'cy_px': city_cam['cy_px'] * scale_y,
+            'cam_height': city_cam['cam_height'],
+            'cam_pitch': city_cam['cam_pitch'],
+        })
+
+    camera = CameraParams(**camera_kwargs)
     rain_params = RainParams(
         rain_rate=rain_rate,
         wind_speed=wind_speed,
@@ -686,10 +852,8 @@ def render_rain_mask(depth_path: Optional[str] = None,
     # 3d. 透视投影比例因子
     # proj_x = f * W_img / (z * W_sensor)   横向 px/m
     # proj_y = f * H_img / (z * H_sensor)   纵向 px/m
-    proj_x = (camera.focal_length * camera.image_width) / \
-             (drops['depth'] * camera.sensor_width)
-    proj_y = (camera.focal_length * camera.image_height) / \
-             (drops['depth'] * camera.sensor_height)
+    proj_x = camera.fx_px / drops['depth']
+    proj_y = camera.fy_px / drops['depth']
 
     # 3e. 图像平面上的条纹位移 (像素)
     #
@@ -704,8 +868,8 @@ def render_rain_mask(depth_path: Optional[str] = None,
     # 对于垂直条纹外观，纵深风主要影响垂直方向和条纹缩短
     #
     # 消失点坐标 (画面中心)
-    cx = camera.image_width / 2.0
-    cy = camera.image_height / 2.0
+    cx = camera.cx_px
+    cy = camera.cy_px
     #
     # 纵深风的径向投影位移
     if abs(v_z) > 0.01:
@@ -770,27 +934,36 @@ def render_rain_mask(depth_path: Optional[str] = None,
 
     # ---- 3k. 景深离焦 (Depth-of-Field) ----
     #
-    # 户外场景中 f=35mm 镜头的超焦距约 10-20m，
-    # 景深范围很大，但近处 (<3m) 和极远处 (>50m) 的雨滴
-    # 仍会有轻微离焦，表现为条纹略微变宽、变柔和。
+    # 使用可调的景深强度：
+    #   dof_strength = 0.0 -> 深景深，绝大部分深度层接近清晰
+    #   dof_strength = 1.0 -> 浅景深，焦平面外雨丝更粗、更软、更暗
     #
-    # 使用简化的离焦模型：
-    #   defocus_ratio = |z - z_focus| / z_focus
-    #   额外宽度 = base_defocus * defocus_ratio
-    # 这比精确的薄透镜 CoC 公式更适合掩码渲染的目的。
-    z_focus = focus_distance  # 对焦距离 (m)，由参数传入
-    base_defocus_px = 0.8   # 最大离焦额外宽度 (px)，户外场景景深大，效果微弱
+    # 通过同时调节“清晰带宽”、“离焦宽化强度”和“亮度衰减下限”
+    # 来控制景深深浅，保持现有渲染风格不变。
+    z_focus = max(focus_distance, 1e-3)
+    dof_strength = float(np.clip(dof_strength, 0.0, 1.0))
 
-    defocus_ratio = np.abs(drops['depth'] - z_focus) / z_focus
+    deep_focus_band = max(z_focus * 1.8, 30.0)
+    shallow_focus_band = max(z_focus * 0.28, 4.0)
+    focus_band = deep_focus_band + \
+        (shallow_focus_band - deep_focus_band) * dof_strength
+
+    deep_defocus_px = 0.02
+    shallow_defocus_px = 1.10
+    base_defocus_px = deep_defocus_px + \
+        (shallow_defocus_px - deep_defocus_px) * dof_strength
+
+    defocus_ratio = np.abs(drops['depth'] - z_focus) / focus_band
     defocus_ratio = np.clip(defocus_ratio, 0.0, 1.0)
     # 离焦额外宽度 (像素)
     defocus_wid = base_defocus_px * defocus_ratio
     # 离焦条纹总宽度
     streak_wid_dof = streak_wid + defocus_wid
 
-    # 离焦导致亮度轻微降低（能量守恒：宽度增加→单位面积亮度下降）
+    # 深景深时衰减很轻，浅景深时衰减更明显
     dof_atten = streak_wid / np.maximum(streak_wid_dof, 0.5)
-    dof_atten = np.clip(dof_atten, 0.5, 1.0)
+    atten_floor = 0.96 - 0.36 * dof_strength
+    dof_atten = np.clip(dof_atten, atten_floor, 1.0)
     intensity = intensity * dof_atten
 
     # ---- 4. 锥形渐变条纹渲染 (Tapered Streak) ----
@@ -873,10 +1046,12 @@ def render_rain_mask(depth_path: Optional[str] = None,
 # ===========================================================================
 
 def batch_render(depth_dir: str, output_dir: str,
+                 camera_dir: Optional[str] = None,
                  rain_rate: float = 25.0,
                  wind_speed: float = 2.0,
                  wind_angle: float = 10.0,
                  exposure_time: float = 1.0/30.0,
+                 dof_strength: float = 0.15,
                  depth_scale: float = 100.0,
                  seed: Optional[int] = 42) -> None:
     """
@@ -885,16 +1060,20 @@ def batch_render(depth_dir: str, output_dir: str,
     Args:
         depth_dir:     深度图目录
         output_dir:    输出目录
+        camera_dir:    相机标定目录，可选（Cityscapes camera）
         rain_rate:     降雨强度 (mm/h)
         wind_speed:    风速 (m/s)
         wind_angle:    风向 (度)
         exposure_time: 曝光时间 (秒)
+        dof_strength:  景深强度，0=深景深，1=浅景深
         depth_scale:   深度缩放 (米)
         seed:          随机种子
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    depth_files = sorted(glob.glob(os.path.join(depth_dir, '*_depth.png')))
+    depth_files = sorted(
+        glob.glob(os.path.join(depth_dir, '**', '*_depth.png'), recursive=True)
+    )
     if not depth_files:
         print(f"[错误] 在 {depth_dir} 中未找到 *_depth.png 文件")
         return
@@ -906,25 +1085,35 @@ def batch_render(depth_dir: str, output_dir: str,
 
     for idx, depth_path in enumerate(depth_files):
         filename = os.path.basename(depth_path)
-        out_name = filename.replace('_depth.png', '_rain_mask.png')
-        out_path = os.path.join(output_dir, out_name)
+        rel_path = os.path.relpath(depth_path, depth_dir)
+        out_rel = rel_path.replace('_depth.png', '_rain_mask.png')
+        out_path = os.path.join(output_dir, out_rel)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        camera_json_path = None
+        if camera_dir:
+            camera_rel = rel_path.replace('_depth.png', '_camera.json')
+            camera_candidate = os.path.join(camera_dir, camera_rel)
+            if os.path.isfile(camera_candidate):
+                camera_json_path = camera_candidate
 
         img_seed = seed + idx if seed is not None else None
 
         mask = render_rain_mask(
             depth_path,
+            camera_json_path=camera_json_path,
             rain_rate=rain_rate,
             wind_speed=wind_speed,
             wind_angle=wind_angle,
             exposure_time=exposure_time,
+            dof_strength=dof_strength,
             depth_scale=depth_scale,
             seed=img_seed
         )
 
-        cv2.imwrite(out_path, mask)
+        cv2.imencode('.png', mask)[1].tofile(out_path)
 
         rain_ratio = np.sum(mask > 0) / mask.size * 100
-        print(f"  [{idx+1}/{len(depth_files)}] {filename} -> {out_name} "
+        print(f"  [{idx+1}/{len(depth_files)}] {filename} -> {out_rel} "
               f"(覆盖率: {rain_ratio:.2f}%)")
 
     print("-" * 60)
@@ -954,6 +1143,7 @@ if __name__ == '__main__':
         """
     )
     parser.add_argument('--depth_dir',   default='depth',      help='深度图目录')
+    parser.add_argument('--camera_dir',  default=None,         help='相机标定目录')
     parser.add_argument('--output_dir',  default='rain_masks',  help='输出目录')
     parser.add_argument('--rain_rate',   type=float, default=25.0,
                         help='降雨强度 (mm/h)')
@@ -963,15 +1153,17 @@ if __name__ == '__main__':
                         help='风向角 (度)')
     parser.add_argument('--exposure',    type=float, default=1.0/30.0,
                         help='曝光时间 (秒)')
+    parser.add_argument('--dof_strength', type=float, default=0.15,
+                        help='景深强度 (0=深景深, 1=浅景深)')
     parser.add_argument('--depth_scale', type=float, default=100.0,
                         help='深度缩放 (米)')
     parser.add_argument('--seed',        type=int,   default=42,
                         help='随机种子')
     parser.add_argument('--single',      action='store_true',
                         help='单张渲染模式（不使用深度图）')
-    parser.add_argument('--width',       type=int, default=512,
+    parser.add_argument('--width',       type=int, default=2048,
                         help='输出图像宽度')
-    parser.add_argument('--height',      type=int, default=512,
+    parser.add_argument('--height',      type=int, default=1024,
                         help='输出图像高度')
     parser.add_argument('--depth_mode',  default='gradient',
                         choices=['gradient', 'uniform', 'radial'],
@@ -988,6 +1180,7 @@ if __name__ == '__main__':
             wind_speed=args.wind_speed,
             wind_angle=args.wind_angle,
             exposure_time=args.exposure,
+            dof_strength=args.dof_strength,
             depth_scale=args.depth_scale,
             image_width=args.width,
             image_height=args.height,
@@ -1002,10 +1195,12 @@ if __name__ == '__main__':
         batch_render(
             depth_dir=args.depth_dir,
             output_dir=args.output_dir,
+            camera_dir=args.camera_dir,
             rain_rate=args.rain_rate,
             wind_speed=args.wind_speed,
             wind_angle=args.wind_angle,
             exposure_time=args.exposure,
+            dof_strength=args.dof_strength,
             depth_scale=args.depth_scale,
             seed=args.seed
         )
