@@ -494,7 +494,8 @@ def generate_default_depth_map(width: int, height: int,
 def load_and_process_depth(depth_path: str,
                            target_size: Tuple[int, int] = (2048, 1024),
                            depth_scale: float = 100.0,
-                           min_depth: float = 1.0) -> np.ndarray:
+                           min_depth: float = 1.0,
+                           harmonic_blend: float = 0.0) -> np.ndarray:
     """
     加载深度图并转换为实际距离 (米)
 
@@ -512,6 +513,7 @@ def load_and_process_depth(depth_path: str,
         target_size: (width, height) 目标尺寸
         depth_scale: 最大深度距离 (米)
         min_depth:   最小截断深度 (米)
+        harmonic_blend: 调和映射混合比例 (0=纯线性, 1=纯调和)
     Returns:
         depth_meters: (H, W) 深度图，单位米
     """
@@ -566,8 +568,21 @@ def load_and_process_depth(depth_path: str,
                                     cv2.INPAINT_TELEA)
             v_norm = (inpainted.astype(np.float64) - 1) / 65534
 
-        # 线性翻转映射: v_norm=1(近) → min_depth, v_norm=0(远) → depth_scale
-        depth_meters = (1.0 - v_norm) * (depth_scale - min_depth) + min_depth
+        # 深度映射: 线性与调和的混合
+        # 线性: depth = (1-v) * (max-min) + min  (均匀分布)
+        # 调和: depth = 1 / (v*(1/min-1/max) + 1/max)  (近处细分, 远处压缩)
+        # harmonic_blend 控制两者混合比例
+        depth_linear = (1.0 - v_norm) * (depth_scale - min_depth) + min_depth
+
+        hb = float(np.clip(harmonic_blend, 0.0, 1.0))
+        if hb > 0.001:
+            inv_min = 1.0 / min_depth
+            inv_max = 1.0 / depth_scale
+            inv_depth = v_norm * (inv_min - inv_max) + inv_max
+            depth_harmonic = 1.0 / np.maximum(inv_depth, 1e-9)
+            depth_meters = (1.0 - hb) * depth_linear + hb * depth_harmonic
+        else:
+            depth_meters = depth_linear
     else:
         # ---- 线性深度 (值大=远) ----
         if depth_img.dtype == np.uint8:
@@ -760,6 +775,7 @@ def render_rain_mask(depth_path: Optional[str] = None,
                      brightness_min: int = 40,
                      brightness_max: int = 255,
                      streak_softness: float = 0.0,
+                     harmonic_blend: float = 0.0,
                      seed: Optional[int] = None) -> np.ndarray:
     """
     主渲染函数：生成物理真实的雨滴掩码图
@@ -840,7 +856,8 @@ def render_rain_mask(depth_path: Optional[str] = None,
         depth_map = load_and_process_depth(
             depth_path,
             target_size=(camera.image_width, camera.image_height),
-            depth_scale=depth_scale
+            depth_scale=depth_scale,
+            harmonic_blend=harmonic_blend
         )
     else:
         depth_map = generate_default_depth_map(
@@ -1121,6 +1138,7 @@ def batch_render(depth_dir: str, output_dir: str,
                  brightness_min: int = 40,
                  brightness_max: int = 255,
                  streak_softness: float = 0.0,
+                 harmonic_blend: float = 0.0,
                  seed: Optional[int] = 42) -> None:
     """
     批量处理：为每张深度图生成对应的雨滴掩码
@@ -1185,6 +1203,7 @@ def batch_render(depth_dir: str, output_dir: str,
             brightness_min=brightness_min,
             brightness_max=brightness_max,
             streak_softness=streak_softness,
+            harmonic_blend=harmonic_blend,
             seed=img_seed
         )
 

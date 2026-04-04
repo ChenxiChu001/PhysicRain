@@ -233,6 +233,7 @@ class BatchRenderThread(QThread):
                         cam_pitch=self.params['cam_pitch'],
                         brightness_min=self.params.get('brightness_min', 40),
                         brightness_max=self.params.get('brightness_max', 255),
+                        harmonic_blend=self.params.get('harmonic_blend', 0.0),
                         seed=img_seed,
                     )
                     cv2.imencode('.png', mask)[1].tofile(out_path)
@@ -945,6 +946,12 @@ class RenderParamsPage(QScrollArea):
         brightness_card.addRow(self.brightness_max)
         layout.addWidget(brightness_card)
 
+        # 深度映射卡片
+        depth_map_card = AppleCard('深度映射')
+        self.harmonic_blend = AppleSliderRow('调和混合', 0.0, 1.0, 0.0, 0.01, 2, '')
+        depth_map_card.addRow(self.harmonic_blend)
+        layout.addWidget(depth_map_card)
+
         # 预览 + 按钮
         layout.addSpacing(8)
 
@@ -1570,6 +1577,7 @@ class RainRendererApp(QMainWindow):
             self.render_page.depth_scale.slider,
             self.render_page.brightness_min.slider,
             self.render_page.brightness_max.slider,
+            self.render_page.harmonic_blend.slider,
             self.camera_page.focal_length.slider,
             self.camera_page.sensor_w.slider,
             self.camera_page.sensor_h.slider,
@@ -1728,6 +1736,7 @@ class RainRendererApp(QMainWindow):
             'depth_scale': rp.depth_scale.value(),
             'brightness_min': int(rp.brightness_min.value()),
             'brightness_max': int(rp.brightness_max.value()),
+            'harmonic_blend': rp.harmonic_blend.value(),
             'image_width': op.out_width.value(),
             'image_height': op.out_height.value(),
         }
