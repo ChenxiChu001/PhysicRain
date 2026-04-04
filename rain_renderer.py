@@ -546,27 +546,28 @@ def load_and_process_depth(depth_path: str,
     if is_inverse:
         # ---- 逆深度 (Depth Anything V2): 值大=近, 0=无效 ----
         invalid = img_f <= 0
-        v_norm = img_f / img_max  # [0, 1], 1=最近
+        valid_vals = img_f[~invalid]
 
-        # 先对无效像素做空间插值
+        if valid_vals.size == 0:
+            return np.full(img_f.shape, depth_scale, dtype=np.float64)
+
+        # robust 归一化: 用 p2/p98 百分位消除极端值干扰
+        v_lo = np.percentile(valid_vals, 2)
+        v_hi = np.percentile(valid_vals, 98)
+        v_range = max(v_hi - v_lo, 1e-6)
+        v_norm = np.clip((img_f - v_lo) / v_range, 0.0, 1.0)  # 1=近, 0=远
+
+        # 无效像素用空间插值填充
         if np.any(invalid):
-            valid_vals = v_norm[~invalid]
-            if valid_vals.size > 0:
-                norm_u16 = (v_norm * 65534 + 1).astype(np.uint16)
-                norm_u16[invalid] = 0
-                inpaint_mask = invalid.astype(np.uint8) * 255
-                inpainted = cv2.inpaint(norm_u16, inpaint_mask, 5,
-                                        cv2.INPAINT_TELEA)
-                v_norm = (inpainted.astype(np.float64) - 1) / 65534
-            else:
-                v_norm[invalid] = 0.0
+            norm_u16 = (v_norm * 65534 + 1).astype(np.uint16)
+            norm_u16[invalid] = 0
+            inpaint_mask = invalid.astype(np.uint8) * 255
+            inpainted = cv2.inpaint(norm_u16, inpaint_mask, 5,
+                                    cv2.INPAINT_TELEA)
+            v_norm = (inpainted.astype(np.float64) - 1) / 65534
 
-        # 调和映射: v_norm=1 → min_depth, v_norm→0 → depth_scale
-        #   depth = 1 / (v_norm * (1/min_depth - 1/depth_scale) + 1/depth_scale)
-        inv_min = 1.0 / min_depth
-        inv_max = 1.0 / depth_scale
-        inv_depth = v_norm * (inv_min - inv_max) + inv_max
-        depth_meters = 1.0 / np.maximum(inv_depth, 1e-9)
+        # 线性翻转映射: v_norm=1(近) → min_depth, v_norm=0(远) → depth_scale
+        depth_meters = (1.0 - v_norm) * (depth_scale - min_depth) + min_depth
     else:
         # ---- 线性深度 (值大=远) ----
         if depth_img.dtype == np.uint8:
@@ -756,6 +757,8 @@ def render_rain_mask(depth_path: Optional[str] = None,
                      depth_mode: str = 'gradient',
                      cam_height: float = 1.6,
                      cam_pitch: float = 0.0,
+                     brightness_min: int = 40,
+                     brightness_max: int = 255,
                      seed: Optional[int] = None) -> np.ndarray:
     """
     主渲染函数：生成物理真实的雨滴掩码图
@@ -782,6 +785,8 @@ def render_rain_mask(depth_path: Optional[str] = None,
         depth_mode:      默认深度图模式 ('gradient'/'uniform'/'radial')
         cam_height:      相机离地高度 (米)
         cam_pitch:       相机俯仰角 (度)
+        brightness_min:  雨丝最低亮度 (0-255)，默认 40
+        brightness_max:  雨丝最高亮度 (0-255)，默认 255
         seed:            随机种子
     Returns:
         mask: (image_height, image_width) uint8 掩码，背景=0，雨滴=白色
@@ -950,8 +955,10 @@ def render_rain_mask(depth_path: Optional[str] = None,
     jitter = 1.0 + np.random.uniform(-0.15, 0.15, n_drops)
     brightness = np.clip(brightness * jitter, 0.0, 1.0)
 
-    # 映射到 [40, 255]：提高最暗下限，远处小雨滴至少有 40/255 ≈ 16% 亮度
-    intensity = (40 + 215 * brightness).astype(np.float32)
+    # 映射到 [brightness_min, brightness_max]
+    b_min = int(np.clip(brightness_min, 0, 255))
+    b_max = int(np.clip(brightness_max, b_min, 255))
+    intensity = (b_min + (b_max - b_min) * brightness).astype(np.float32)
 
     # ---- 3j. 风湍流角度扰动 ----
     # 真实大气中存在小尺度湍流，使每个雨滴的运动方向
@@ -1081,6 +1088,8 @@ def batch_render(depth_dir: str, output_dir: str,
                  exposure_time: float = 1.0/30.0,
                  dof_strength: float = 0.15,
                  depth_scale: float = 100.0,
+                 brightness_min: int = 40,
+                 brightness_max: int = 255,
                  seed: Optional[int] = 42) -> None:
     """
     批量处理：为每张深度图生成对应的雨滴掩码
@@ -1095,6 +1104,8 @@ def batch_render(depth_dir: str, output_dir: str,
         exposure_time: 曝光时间 (秒)
         dof_strength:  景深强度，0=深景深，1=浅景深
         depth_scale:   深度缩放 (米)
+        brightness_min: 雨丝最低亮度 (0-255)
+        brightness_max: 雨丝最高亮度 (0-255)
         seed:          随机种子
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -1139,6 +1150,8 @@ def batch_render(depth_dir: str, output_dir: str,
             exposure_time=exposure_time,
             dof_strength=dof_strength,
             depth_scale=depth_scale,
+            brightness_min=brightness_min,
+            brightness_max=brightness_max,
             seed=img_seed
         )
 

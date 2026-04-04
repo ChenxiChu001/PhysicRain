@@ -231,6 +231,8 @@ class BatchRenderThread(QThread):
                         image_height=self.params['image_height'],
                         cam_height=self.params['cam_height'],
                         cam_pitch=self.params['cam_pitch'],
+                        brightness_min=self.params.get('brightness_min', 40),
+                        brightness_max=self.params.get('brightness_max', 255),
                         seed=img_seed,
                     )
                     cv2.imencode('.png', mask)[1].tofile(out_path)
@@ -935,6 +937,14 @@ class RenderParamsPage(QScrollArea):
         optics_card.addRow(self.depth_scale)
         layout.addWidget(optics_card)
 
+        # 亮度参数卡片
+        brightness_card = AppleCard('雨丝亮度')
+        self.brightness_min = AppleSliderRow('最低亮度', 0, 255, 40, 1, 0, '')
+        self.brightness_max = AppleSliderRow('最高亮度', 0, 255, 255, 1, 0, '')
+        brightness_card.addRow(self.brightness_min)
+        brightness_card.addRow(self.brightness_max)
+        layout.addWidget(brightness_card)
+
         # 预览 + 按钮
         layout.addSpacing(8)
 
@@ -1558,6 +1568,8 @@ class RainRendererApp(QMainWindow):
             self.render_page.focus_dist.slider,
             self.render_page.dof_strength.slider,
             self.render_page.depth_scale.slider,
+            self.render_page.brightness_min.slider,
+            self.render_page.brightness_max.slider,
             self.camera_page.focal_length.slider,
             self.camera_page.sensor_w.slider,
             self.camera_page.sensor_h.slider,
@@ -1714,6 +1726,8 @@ class RainRendererApp(QMainWindow):
             'focus_distance': rp.focus_dist.value(),
             'dof_strength': rp.dof_strength.value(),
             'depth_scale': rp.depth_scale.value(),
+            'brightness_min': int(rp.brightness_min.value()),
+            'brightness_max': int(rp.brightness_max.value()),
             'image_width': op.out_width.value(),
             'image_height': op.out_height.value(),
         }
