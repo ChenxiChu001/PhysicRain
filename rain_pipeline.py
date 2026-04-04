@@ -124,8 +124,10 @@ def _find_depth_and_camera(
     depth_candidates = []
     for ext in ('.png', '.jpg'):
         depth_candidates.extend([
+            f'{basename}_depth_u16{ext}',
             f'{basename}_depth{ext}',
             f'{basename}{ext}',
+            f'{stem}_depth_u16{ext}',
             f'{stem}_depth{ext}',
             f'{stem}_disparity_depth{ext}',
         ])

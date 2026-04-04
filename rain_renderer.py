@@ -498,8 +498,14 @@ def load_and_process_depth(depth_path: str,
     """
     加载深度图并转换为实际距离 (米)
 
-    深度图像素值 [0, 255] 线性映射到 [min_depth, depth_scale] 米。
-    值越大 = 距离越远。
+    支持两种格式:
+      1. 逆深度图 (Depth Anything V2 等): 值越大=越近, 0=无效
+         - uint16: 归一化后做调和映射 → [min_depth, depth_scale]
+         - uint8:  同上
+      2. 线性深度图 (旧格式): 值越大=越远
+
+    本函数自动检测方向: 若图像下半部均值 > 上半部均值,
+    则判定为逆深度 (近处在画面下方, 值更大)。
 
     Args:
         depth_path:  深度图文件路径
@@ -522,32 +528,54 @@ def load_and_process_depth(depth_path: str,
         depth_img = cv2.resize(depth_img, target_size,
                                interpolation=cv2.INTER_LINEAR)
 
-    # 16-bit 高精度深度图：约定保存为厘米 (cm)，0 表示无效
-    if depth_img.dtype == np.uint16 and depth_img.max() > 255:
-        depth_meters = depth_img.astype(np.float64) / 100.0
-        invalid = depth_meters <= 0.0
-        if np.any(invalid):
-            # 用空间插值填充无效区域（天空取邻近远距值，近处遮挡取邻近近距值）
-            valid_vals = depth_meters[~invalid]
-            if valid_vals.size > 0:
-                # cv2.inpaint 需要 uint8/uint16 输入，将深度归一化到 uint16
-                d_max = valid_vals.max()
-                d_min = valid_vals.min()
-                d_range = max(d_max - d_min, 1e-3)
-                norm = ((depth_meters - d_min) / d_range * 65534 + 1).astype(np.uint16)
-                norm[invalid] = 0
-                inpaint_mask = invalid.astype(np.uint8) * 255
-                # Telea 算法，半径 5 像素
-                inpainted = cv2.inpaint(norm, inpaint_mask, 5, cv2.INPAINT_TELEA)
-                # 解码回米
-                depth_meters = (inpainted.astype(np.float64) - 1) / 65534 * d_range + d_min
-            else:
-                depth_meters[invalid] = depth_scale
-        depth_meters = np.clip(depth_meters, min_depth, depth_scale)
-        return depth_meters
+    # 转为 float
+    img_f = depth_img.astype(np.float64)
+    img_max = img_f.max()
+    if img_max <= 0:
+        return np.full(img_f.shape, depth_scale, dtype=np.float64)
 
-    depth_normalized = depth_img.astype(np.float64) / 255.0
-    depth_meters = depth_normalized * (depth_scale - min_depth) + min_depth
+    # 自动检测: 逆深度 vs 线性深度
+    # 街景图: 画面下半部是近处地面, 上半部是远处天空
+    # 逆深度: 下半部值大 (近=大)
+    # 线性深度: 下半部值小 (近=小)
+    H = img_f.shape[0]
+    top_mean = img_f[:H // 3, :].mean()
+    bot_mean = img_f[2 * H // 3:, :].mean()
+    is_inverse = (bot_mean > top_mean * 1.2)
+
+    if is_inverse:
+        # ---- 逆深度 (Depth Anything V2): 值大=近, 0=无效 ----
+        invalid = img_f <= 0
+        v_norm = img_f / img_max  # [0, 1], 1=最近
+
+        # 先对无效像素做空间插值
+        if np.any(invalid):
+            valid_vals = v_norm[~invalid]
+            if valid_vals.size > 0:
+                norm_u16 = (v_norm * 65534 + 1).astype(np.uint16)
+                norm_u16[invalid] = 0
+                inpaint_mask = invalid.astype(np.uint8) * 255
+                inpainted = cv2.inpaint(norm_u16, inpaint_mask, 5,
+                                        cv2.INPAINT_TELEA)
+                v_norm = (inpainted.astype(np.float64) - 1) / 65534
+            else:
+                v_norm[invalid] = 0.0
+
+        # 调和映射: v_norm=1 → min_depth, v_norm→0 → depth_scale
+        #   depth = 1 / (v_norm * (1/min_depth - 1/depth_scale) + 1/depth_scale)
+        inv_min = 1.0 / min_depth
+        inv_max = 1.0 / depth_scale
+        inv_depth = v_norm * (inv_min - inv_max) + inv_max
+        depth_meters = 1.0 / np.maximum(inv_depth, 1e-9)
+    else:
+        # ---- 线性深度 (值大=远) ----
+        if depth_img.dtype == np.uint8:
+            depth_normalized = img_f / 255.0
+        else:
+            depth_normalized = img_f / img_max
+        depth_meters = depth_normalized * (depth_scale - min_depth) + min_depth
+
+    depth_meters = np.clip(depth_meters, min_depth, depth_scale)
     return depth_meters
 
 
@@ -1072,10 +1100,11 @@ def batch_render(depth_dir: str, output_dir: str,
     os.makedirs(output_dir, exist_ok=True)
 
     depth_files = sorted(
+        glob.glob(os.path.join(depth_dir, '**', '*_depth_u16.png'), recursive=True) +
         glob.glob(os.path.join(depth_dir, '**', '*_depth.png'), recursive=True)
     )
     if not depth_files:
-        print(f"[错误] 在 {depth_dir} 中未找到 *_depth.png 文件")
+        print(f"[错误] 在 {depth_dir} 中未找到深度图文件")
         return
 
     print(f"[信息] 找到 {len(depth_files)} 张深度图")
@@ -1086,12 +1115,15 @@ def batch_render(depth_dir: str, output_dir: str,
     for idx, depth_path in enumerate(depth_files):
         filename = os.path.basename(depth_path)
         rel_path = os.path.relpath(depth_path, depth_dir)
-        out_rel = rel_path.replace('_depth.png', '_rain_mask.png')
+        out_rel = rel_path.replace('_depth_u16.png', '_rain_mask.png')
+        out_rel = out_rel.replace('_depth.png', '_rain_mask.png')
         out_path = os.path.join(output_dir, out_rel)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         camera_json_path = None
         if camera_dir:
-            camera_rel = rel_path.replace('_depth.png', '_camera.json')
+            camera_rel = rel_path.replace('_depth_u16.png', '_camera.json')
+            camera_rel = camera_rel.replace('_depth.png', '_camera.json')
+            camera_rel = camera_rel.replace('_leftImg8bit_camera.json', '_camera.json')
             camera_candidate = os.path.join(camera_dir, camera_rel)
             if os.path.isfile(camera_candidate):
                 camera_json_path = camera_candidate

@@ -88,7 +88,7 @@ PRESETS = {
 
 
 CITYSCAPES_IMAGE_DIR = os.path.join('leftImg8bit_trainvaltest', 'leftImg8bit')
-CITYSCAPES_DEPTH_DIR = os.path.join('depth_trainvaltest', 'depth')
+CITYSCAPES_DEPTH_DIR = os.path.join('depth_trainvaltest', 'gray16')
 CITYSCAPES_CAMERA_DIR = os.path.join('camera_trainvaltest', 'camera')
 CITYSCAPES_IMAGE_SUFFIX = '_leftImg8bit'
 
@@ -153,7 +153,11 @@ def _resolve_cityscapes_sample_paths(
     basename = os.path.splitext(os.path.basename(image_path))[0]
     stem = _strip_cityscapes_suffix(basename)
 
-    depth_path = os.path.join(depth_root, rel_dir, f'{stem}_depth.png')
+    depth_path = os.path.join(depth_root, rel_dir, f'{basename}_depth_u16.png')
+    if not os.path.isfile(depth_path):
+        depth_path = os.path.join(depth_root, rel_dir, f'{stem}_depth_u16.png')
+    if not os.path.isfile(depth_path):
+        depth_path = os.path.join(depth_root, rel_dir, f'{stem}_depth.png')
     camera_path = os.path.join(camera_root, rel_dir, f'{stem}_camera.json')
 
     if not os.path.isfile(depth_path):
