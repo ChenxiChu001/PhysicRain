@@ -740,18 +740,18 @@ def sample_raindrops_efficient(rain_params: RainParams,
 
 def render_rain_mask(depth_path: Optional[str] = None,
                      camera_json_path: Optional[str] = None,
-                     rain_rate: float = 25.0,
-                     wind_speed: float = 2.0,
+                     rain_rate: float = 5.0,
+                     wind_speed: float = 0.5,
                      wind_angle: float = 10.0,
                      wind_direction=None,
-                     exposure_time: float = 1.0/30.0,
+                     exposure_time: float = 0.02,
                      depth_scale: float = 100.0,
                      focal_length: float = 35.0,
                      sensor_width: float = 36.0,
                      sensor_height: float = 24.0,
                      image_width: int = 2048,
                      image_height: int = 1024,
-                     turbulence_deg: float = 2.5,
+                     turbulence_deg: float = 1.0,
                      focus_distance: float = 12.0,
                      dof_strength: float = 0.15,
                      depth_mode: str = 'gradient',
@@ -759,6 +759,7 @@ def render_rain_mask(depth_path: Optional[str] = None,
                      cam_pitch: float = 0.0,
                      brightness_min: int = 40,
                      brightness_max: int = 255,
+                     streak_softness: float = 0.0,
                      seed: Optional[int] = None) -> np.ndarray:
     """
     主渲染函数：生成物理真实的雨滴掩码图
@@ -787,6 +788,7 @@ def render_rain_mask(depth_path: Optional[str] = None,
         cam_pitch:       相机俯仰角 (度)
         brightness_min:  雨丝最低亮度 (0-255)，默认 40
         brightness_max:  雨丝最高亮度 (0-255)，默认 255
+        streak_softness: 雨丝边缘柔化程度 (0-1)，0=硬边(当前), 1=最柔和透明感
         seed:            随机种子
     Returns:
         mask: (image_height, image_width) uint8 掩码，背景=0，雨滴=白色
@@ -1001,26 +1003,32 @@ def render_rain_mask(depth_path: Optional[str] = None,
     dof_atten = np.clip(dof_atten, atten_floor, 1.0)
     intensity = intensity * dof_atten
 
-    # ---- 4. 锥形渐变条纹渲染 (Tapered Streak) ----
+    # ---- 4. 条纹渲染 (Gaussian Cross-Section) ----
     #
-    # 真实的运动模糊条纹不是均匀亮度的硬边线段。
-    # 由于快门开合和雨滴球形形状，条纹呈现：
-    #   - 中间最亮，两端渐暗（类似高斯沿轴分布）
-    #   - 边缘有柔和的散射光晕
+    # 真实雨丝在照片中呈现为连续的运动模糊条纹，其横截面亮度
+    # 服从高斯分布 (Garg & Nayar, SIGGRAPH 2006):
+    #   I(d) = I_peak * exp(-d² / (2σ²))
+    # 其中 d = 像素到条纹中心轴的距离, σ 由雨滴直径投影决定。
     #
-    # 实现方法：将每条条纹沿长度方向分成 N 个子段，
-    # 每个子段的亮度按照高斯权重衰减。
-    # 子段数量根据条纹长度自适应：短条纹用少量子段，长条纹用更多。
+    # streak_softness 控制高斯 σ 的扩展:
+    #   0 = 窄高斯 (σ ≈ 条纹半宽), 近似硬边
+    #   1 = 宽高斯 (σ ≈ 2×条纹半宽), 边缘渐隐透明感强
+    #
+    # 每条条纹作为一个整体绘制 (不分段), 通过纵向高斯权重
+    # 实现头尾渐隐, 避免分段导致的断裂伪影。
+
+    softness = float(np.clip(streak_softness, 0.0, 1.0))
 
     mask = np.zeros((camera.image_height, camera.image_width),
                     dtype=np.float32)
 
+    H_img, W_img = camera.image_height, camera.image_width
     sort_idx = np.argsort(-drops['depth'])
 
     for i in sort_idx:
         L = streak_len[i]
         W_dof = streak_wid_dof[i]
-        if L < 0.5:
+        if L < 1.0:
             continue
 
         x0 = drops['x'][i]
@@ -1028,49 +1036,71 @@ def render_rain_mask(depth_path: Optional[str] = None,
         ang = streak_ang[i]
         bright = intensity[i]
 
-        # 条纹方向单位向量
-        dx_unit = np.sin(ang)
-        dy_unit = np.cos(ang)
+        if bright < 1.0:
+            continue
 
-        lw = max(1, int(round(W_dof)))
+        # 条纹方向单位向量 (沿轴) 和法线 (横截面方向)
+        dx = np.sin(ang)
+        dy = np.cos(ang)
 
-        # ---- 锥形渐变：沿条纹轴线分段渲染 ----
-        # 子段数 = 条纹长度 / 3，但至少 2 段，最多 12 段
-        n_segs = max(2, min(int(L / 3.0), 12))
-        seg_len = L / n_segs
+        # 条纹中点
+        cx = x0 + 0.5 * L * dx
+        cy = y0 + 0.5 * L * dy
 
-        for s in range(n_segs):
-            # 该子段在条纹上的归一化位置 t ∈ [0, 1]
-            t_start = s / n_segs
-            t_end = (s + 1) / n_segs
-            t_mid = 0.5 * (t_start + t_end)
+        # 高斯横截面 σ: 基础为条纹半宽, softness 可扩展
+        half_w = max(W_dof * 0.5, 0.5)
+        sigma_cross = half_w * (1.0 + 1.5 * softness)
 
-            # 高斯权重：中间 (t=0.5) 最亮，两端渐暗
-            # sigma=0.45 让中间 80% 区域保持高亮度，仅两端 ~10% 快速衰减
-            # 这符合运动模糊的物理特性：球形雨滴在快门时间内
-            # 中间段停留时间最长（相对于像素），两端快速经过
-            gauss_weight = np.exp(-0.5 * ((t_mid - 0.5) / 0.45) ** 2)
-            seg_bright = bright * gauss_weight
+        # 纵向 σ: 控制头尾渐隐, sigma=0.45*L 让中间 80% 保持高亮
+        sigma_along = 0.45 * L
 
-            if seg_bright < 1.0:
-                continue
+        # 计算该条纹影响的像素包围盒 (3σ 截断)
+        extent_cross = 3.0 * sigma_cross
+        extent_along = L * 0.5 + 2.0 * half_w  # 到两端再加一点余量
 
-            # 子段两端的像素坐标
-            sx0 = x0 + t_start * L * dx_unit
-            sy0 = y0 + t_start * L * dy_unit
-            sx1 = x0 + t_end * L * dx_unit
-            sy1 = y0 + t_end * L * dy_unit
+        # 包围盒的四个角 (沿轴和法线方向)
+        abs_dx, abs_dy = abs(dx), abs(dy)
+        bbox_hx = extent_along * abs_dx + extent_cross * abs_dy
+        bbox_hy = extent_along * abs_dy + extent_cross * abs_dx
 
-            pt1 = (int(round(sx0)), int(round(sy0)))
-            pt2 = (int(round(sx1)), int(round(sy1)))
+        x_min = max(0, int(cx - bbox_hx) - 1)
+        x_max = min(W_img - 1, int(cx + bbox_hx) + 1)
+        y_min = max(0, int(cy - bbox_hy) - 1)
+        y_max = min(H_img - 1, int(cy + bbox_hy) + 1)
 
-            cv2.line(mask, pt1, pt2, float(seg_bright),
-                     thickness=lw, lineType=cv2.LINE_AA)
+        if x_min >= x_max or y_min >= y_max:
+            continue
 
-    # ---- 5. 不做全局模糊 ----
-    # 锥形渐变本身已提供了条纹两端的自然柔化，
-    # 加上 cv2.LINE_AA 的抗锯齿，无需额外模糊。
-    # 全局高斯模糊会让整个画面发虚（"近视眼"效果），去掉。
+        # 构建该区域的像素坐标网格
+        ys = np.arange(y_min, y_max + 1, dtype=np.float32)
+        xs = np.arange(x_min, x_max + 1, dtype=np.float32)
+        gx, gy = np.meshgrid(xs, ys)
+
+        # 像素相对于条纹起点的偏移
+        rel_x = gx - x0
+        rel_y = gy - y0
+
+        # 投影到条纹轴线方向: t = 沿轴距离 / L, 0=起点, 1=终点
+        t = (rel_x * dx + rel_y * dy) / max(L, 1e-6)
+
+        # 投影到法线方向: d = 到轴线的垂直距离
+        d = rel_x * (-dy) + rel_y * dx
+
+        # 纵向高斯权重: 中间 (t=0.5) 最亮, 两端渐暗
+        along_weight = np.exp(-0.5 * ((t - 0.5) / 0.45) ** 2)
+        # 超出条纹两端的区域快速衰减
+        along_weight[t < -0.05] = 0.0
+        along_weight[t > 1.05] = 0.0
+
+        # 横向高斯权重: 中心最亮, 边缘渐隐 → 透明感
+        cross_weight = np.exp(-0.5 * (d / sigma_cross) ** 2)
+
+        # 综合亮度
+        patch = bright * along_weight * cross_weight
+
+        # 用 max 混合到掩码 (保持近处条纹优先)
+        roi = mask[y_min:y_max + 1, x_min:x_max + 1]
+        np.maximum(roi, patch, out=roi)
 
     mask = np.clip(mask, 0, 255)
     return mask.astype(np.uint8)
@@ -1090,6 +1120,7 @@ def batch_render(depth_dir: str, output_dir: str,
                  depth_scale: float = 100.0,
                  brightness_min: int = 40,
                  brightness_max: int = 255,
+                 streak_softness: float = 0.0,
                  seed: Optional[int] = 42) -> None:
     """
     批量处理：为每张深度图生成对应的雨滴掩码
@@ -1106,6 +1137,7 @@ def batch_render(depth_dir: str, output_dir: str,
         depth_scale:   深度缩放 (米)
         brightness_min: 雨丝最低亮度 (0-255)
         brightness_max: 雨丝最高亮度 (0-255)
+        streak_softness: 雨丝边缘柔化 (0-1)
         seed:          随机种子
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -1152,6 +1184,7 @@ def batch_render(depth_dir: str, output_dir: str,
             depth_scale=depth_scale,
             brightness_min=brightness_min,
             brightness_max=brightness_max,
+            streak_softness=streak_softness,
             seed=img_seed
         )
 
