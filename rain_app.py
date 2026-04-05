@@ -843,12 +843,21 @@ class ImagePreviewDialog(QWidget):
 # 页面：渲染参数
 # ===========================================================================
 
-class RenderParamsPage(QScrollArea):
+class RenderParamsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setStyleSheet('QScrollArea { border: none; background: transparent; }')
+        self.setStyleSheet('background: transparent;')
+
+        # 主布局: 上下分割, 上面参数可滚动, 下面预览固定
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ---- 上半部分: 可滚动参数区 ----
+        params_scroll = QScrollArea()
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        params_scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
 
         container = QWidget()
         container.setStyleSheet('background: transparent;')
@@ -952,10 +961,18 @@ class RenderParamsPage(QScrollArea):
         depth_map_card.addRow(self.harmonic_blend)
         layout.addWidget(depth_map_card)
 
-        # 预览 + 按钮
-        layout.addSpacing(8)
+        # 参数区结束, 放入滚动容器
+        params_scroll.setWidget(container)
+        main_layout.addWidget(params_scroll, stretch=1)
 
-        # 预览区
+        # ---- 下半部分: 固定预览区 (约占一半屏幕) ----
+        preview_container = QWidget()
+        preview_container.setStyleSheet('background: transparent;')
+        preview_outer = QVBoxLayout(preview_container)
+        preview_outer.setContentsMargins(24, 8, 24, 16)
+        preview_outer.setSpacing(8)
+
+        # 预览卡片
         self.preview_card = QFrame()
         self.preview_card.setStyleSheet(f'''
             background-color: {AppleColors.CARD};
@@ -973,7 +990,7 @@ class RenderParamsPage(QScrollArea):
 
         self.preview_label = QLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(300, 300)
+        self.preview_label.setMinimumSize(400, 300)
         self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.preview_label.setStyleSheet(f'''
             background-color: #111113;
@@ -990,7 +1007,7 @@ class RenderParamsPage(QScrollArea):
         self.stats_label.setStyleSheet(f'color: {AppleColors.TEXT_TER}; font-size: 12px;')
         preview_layout.addWidget(self.stats_label)
 
-        layout.addWidget(self.preview_card, stretch=1)
+        preview_outer.addWidget(self.preview_card, stretch=1)
 
         # 按钮
         btn_layout = QHBoxLayout()
@@ -1000,9 +1017,9 @@ class RenderParamsPage(QScrollArea):
         self.save_btn.setEnabled(False)
         btn_layout.addWidget(self.render_btn)
         btn_layout.addWidget(self.save_btn)
-        layout.addLayout(btn_layout)
+        preview_outer.addLayout(btn_layout)
 
-        self.setWidget(container)
+        main_layout.addWidget(preview_container, stretch=1)
 
     def _on_wind_combo(self, idx):
         """罗盘方向选择时同步更新微调滑块"""
@@ -1445,8 +1462,8 @@ class RainRendererApp(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setMinimumSize(1100, 750)
-        self.resize(1200, 800)
+        self.setMinimumSize(1300, 850)
+        self.resize(1400, 900)
 
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  'rain_icon.ico')
