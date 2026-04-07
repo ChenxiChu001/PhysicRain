@@ -557,6 +557,7 @@ class AppleSidebar(QWidget):
             ('相机',     '\u25ce'),     # bullseye
             ('输出设置', '\u2b1c'),     # square
             ('批量处理', '\u25a4'),     # squares
+            ('图像合成', '\u25d0'),     # circle half
         ]
 
         for i, (text, icon) in enumerate(nav_items):
@@ -876,6 +877,84 @@ class RenderParamsPage(QWidget):
 
         layout.addSpacing(4)
 
+        line_edit_style = f'''
+            QLineEdit {{
+                background: {AppleColors.BG_TERTIARY};
+                border: none; border-radius: 8px;
+                padding: 6px 12px;
+                color: {AppleColors.TEXT}; font-size: 13px;
+            }}
+        '''
+        small_btn_style = f'''
+            QPushButton {{
+                background-color: {AppleColors.BG_TERTIARY};
+                color: {AppleColors.ACCENT};
+                border: none; border-radius: 6px;
+                font-size: 12px; font-weight: 600;
+                padding: 0 8px;
+            }}
+            QPushButton:hover {{
+                background-color: #48484a;
+            }}
+        '''
+
+        # 图像与深度卡片
+        io_card = AppleCard('图像与深度')
+
+        # 原始图像行
+        img_row = QWidget()
+        img_row.setFixedHeight(52)
+        img_lay = QHBoxLayout(img_row)
+        img_lay.setContentsMargins(16, 0, 16, 0)
+        img_lbl = QLabel('原始图像')
+        img_lbl.setStyleSheet(f'color: {AppleColors.TEXT}; font-size: 15px;')
+        img_lay.addWidget(img_lbl)
+        self.image_edit = QLineEdit()
+        self.image_edit.setPlaceholderText('可选，用于合成预览')
+        self.image_edit.setReadOnly(True)
+        self.image_edit.setStyleSheet(line_edit_style)
+        img_lay.addWidget(self.image_edit, stretch=1)
+        self.image_browse_btn = QPushButton('浏览')
+        self.image_browse_btn.setFixedSize(52, 28)
+        self.image_browse_btn.setCursor(Qt.PointingHandCursor)
+        self.image_browse_btn.setStyleSheet(small_btn_style)
+        img_lay.addWidget(self.image_browse_btn)
+        self.image_clear_btn = QPushButton('清除')
+        self.image_clear_btn.setFixedSize(52, 28)
+        self.image_clear_btn.setCursor(Qt.PointingHandCursor)
+        self.image_clear_btn.setStyleSheet(small_btn_style)
+        self.image_clear_btn.setVisible(False)
+        img_lay.addWidget(self.image_clear_btn)
+        io_card.addRow(img_row)
+
+        # 深度图行
+        depth_row = QWidget()
+        depth_row.setFixedHeight(52)
+        d_lay = QHBoxLayout(depth_row)
+        d_lay.setContentsMargins(16, 0, 16, 0)
+        d_lbl = QLabel('深度图')
+        d_lbl.setStyleSheet(f'color: {AppleColors.TEXT}; font-size: 15px;')
+        d_lay.addWidget(d_lbl)
+        self.depth_edit = QLineEdit()
+        self.depth_edit.setPlaceholderText('可选，用于深度感知渲染')
+        self.depth_edit.setReadOnly(True)
+        self.depth_edit.setStyleSheet(line_edit_style)
+        d_lay.addWidget(self.depth_edit, stretch=1)
+        self.depth_browse_btn = QPushButton('浏览')
+        self.depth_browse_btn.setFixedSize(52, 28)
+        self.depth_browse_btn.setCursor(Qt.PointingHandCursor)
+        self.depth_browse_btn.setStyleSheet(small_btn_style)
+        d_lay.addWidget(self.depth_browse_btn)
+        self.depth_clear_btn = QPushButton('清除')
+        self.depth_clear_btn.setFixedSize(52, 28)
+        self.depth_clear_btn.setCursor(Qt.PointingHandCursor)
+        self.depth_clear_btn.setStyleSheet(small_btn_style)
+        self.depth_clear_btn.setVisible(False)
+        d_lay.addWidget(self.depth_clear_btn)
+        io_card.addRow(depth_row)
+
+        layout.addWidget(io_card)
+
         # 降雨参数卡片
         rain_card = AppleCard('降雨')
         self.rain_rate = AppleSliderRow('降雨量', 0.5, 200.0, 25.0, 0.5, 1, ' mm/h')
@@ -998,7 +1077,7 @@ class RenderParamsPage(QWidget):
             color: {AppleColors.TEXT_TER};
             font-size: 14px;
         ''')
-        self.preview_label.setText('点击「渲染」生成预览')
+        self.preview_label.setText('调节参数实时预览  |  选择原图可预览合成效果')
         self.preview_label.setCursor(Qt.PointingHandCursor)
         preview_layout.addWidget(self.preview_label, stretch=1)
 
@@ -1454,8 +1533,200 @@ class BatchPage(QScrollArea):
 
 
 # ===========================================================================
-# 主窗口
+# 合成页面 - 原图 + 掩码 + 深度图叠加
 # ===========================================================================
+
+class ComposePage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet('background: transparent;')
+
+        self.image_path = None
+        self.mask_path = None
+        self.depth_path = None
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ---- 上半部分: 可滚动控制区 ----
+        params_scroll = QScrollArea()
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        params_scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
+
+        container = QWidget()
+        container.setStyleSheet('background: transparent;')
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        title = QLabel('图像合成')
+        title.setStyleSheet(f'color: {AppleColors.TEXT}; font-size: 28px; font-weight: bold;')
+        layout.addWidget(title)
+
+        subtitle = QLabel('将雨滴掩码叠加到原图上，生成雨天效果')
+        subtitle.setStyleSheet(f'color: {AppleColors.TEXT_SEC}; font-size: 14px;')
+        layout.addWidget(subtitle)
+        layout.addSpacing(4)
+
+        line_edit_style = f'''
+            QLineEdit {{
+                background: {AppleColors.BG_TERTIARY};
+                border: none; border-radius: 8px;
+                padding: 6px 12px;
+                color: {AppleColors.TEXT}; font-size: 13px;
+            }}
+        '''
+
+        # ---- 原图选择 ----
+        img_card = AppleCard('原始图像')
+        img_row = QWidget()
+        img_row.setFixedHeight(52)
+        img_lay = QHBoxLayout(img_row)
+        img_lay.setContentsMargins(16, 0, 16, 0)
+        self.image_edit = QLineEdit()
+        self.image_edit.setPlaceholderText('选择原始图像...')
+        self.image_edit.setStyleSheet(line_edit_style)
+        self.image_edit.setReadOnly(True)
+        self.image_browse_btn = AppleButton('浏览', primary=False)
+        self.image_browse_btn.setFixedWidth(70)
+        img_lay.addWidget(self.image_edit, stretch=1)
+        img_lay.addWidget(self.image_browse_btn)
+        img_card.addRow(img_row)
+        layout.addWidget(img_card)
+
+        # ---- 掩码选择 (可选: 加载现有 或 实时生成) ----
+        mask_card = AppleCard('雨滴掩码')
+        self.mask_mode_widget = QWidget()
+        self.mask_mode_widget.setFixedHeight(52)
+        mm_lay = QHBoxLayout(self.mask_mode_widget)
+        mm_lay.setContentsMargins(16, 0, 16, 0)
+        mm_label = QLabel('来源')
+        mm_label.setStyleSheet(f'color: {AppleColors.TEXT}; font-size: 15px;')
+        mm_lay.addWidget(mm_label)
+        mm_lay.addStretch()
+        self.mask_mode_combo = QComboBox()
+        self.mask_mode_combo.addItems(['加载文件', '实时生成'])
+        self.mask_mode_combo.setFixedWidth(140)
+        self.mask_mode_combo.setStyleSheet(f'''
+            QComboBox {{
+                background-color: {AppleColors.BG_TERTIARY};
+                color: {AppleColors.TEXT};
+                border: none; border-radius: 8px;
+                padding: 4px 10px; font-size: 13px;
+            }}
+            QComboBox::drop-down {{ border: none; width: 20px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {AppleColors.BG_SECONDARY};
+                color: {AppleColors.TEXT};
+                border: 1px solid {AppleColors.BG_TERTIARY};
+                selection-background-color: {AppleColors.ACCENT};
+            }}
+        ''')
+        mm_lay.addWidget(self.mask_mode_combo)
+        mask_card.addRow(self.mask_mode_widget)
+
+        # 加载文件行
+        mask_file_row = QWidget()
+        mask_file_row.setFixedHeight(52)
+        mf_lay = QHBoxLayout(mask_file_row)
+        mf_lay.setContentsMargins(16, 0, 16, 0)
+        self.mask_edit = QLineEdit()
+        self.mask_edit.setPlaceholderText('选择掩码文件...')
+        self.mask_edit.setStyleSheet(line_edit_style)
+        self.mask_edit.setReadOnly(True)
+        self.mask_browse_btn = AppleButton('浏览', primary=False)
+        self.mask_browse_btn.setFixedWidth(70)
+        mf_lay.addWidget(self.mask_edit, stretch=1)
+        mf_lay.addWidget(self.mask_browse_btn)
+        self.mask_file_row = mask_file_row
+        mask_card.addRow(mask_file_row)
+        layout.addWidget(mask_card)
+
+        # ---- 深度图选择 (可选) ----
+        depth_card = AppleCard('深度图 (实时生成时使用)')
+        depth_row = QWidget()
+        depth_row.setFixedHeight(52)
+        d_lay = QHBoxLayout(depth_row)
+        d_lay.setContentsMargins(16, 0, 16, 0)
+        self.depth_edit = QLineEdit()
+        self.depth_edit.setPlaceholderText('选择深度图 (可选)...')
+        self.depth_edit.setStyleSheet(line_edit_style)
+        self.depth_edit.setReadOnly(True)
+        self.depth_browse_btn = AppleButton('浏览', primary=False)
+        self.depth_browse_btn.setFixedWidth(70)
+        d_lay.addWidget(self.depth_edit, stretch=1)
+        d_lay.addWidget(self.depth_browse_btn)
+        depth_card.addRow(depth_row)
+        self.depth_card = depth_card
+        layout.addWidget(depth_card)
+
+        params_scroll.setWidget(container)
+        main_layout.addWidget(params_scroll, stretch=0)
+
+        # ---- 下半部分: 预览区 ----
+        preview_container = QWidget()
+        preview_container.setStyleSheet('background: transparent;')
+        preview_outer = QVBoxLayout(preview_container)
+        preview_outer.setContentsMargins(24, 8, 24, 16)
+        preview_outer.setSpacing(8)
+
+        self.preview_card = QFrame()
+        self.preview_card.setStyleSheet(f'''
+            background-color: {AppleColors.CARD};
+            border-radius: 12px;
+        ''')
+        preview_shadow = QGraphicsDropShadowEffect()
+        preview_shadow.setBlurRadius(20)
+        preview_shadow.setColor(QColor(0, 0, 0, 60))
+        preview_shadow.setOffset(0, 2)
+        self.preview_card.setGraphicsEffect(preview_shadow)
+
+        preview_layout = QVBoxLayout(self.preview_card)
+        preview_layout.setContentsMargins(12, 12, 12, 12)
+        preview_layout.setSpacing(8)
+
+        self.compose_preview = QLabel()
+        self.compose_preview.setAlignment(Qt.AlignCenter)
+        self.compose_preview.setMinimumSize(400, 300)
+        self.compose_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.compose_preview.setStyleSheet(f'''
+            background-color: #111113;
+            border-radius: 8px;
+            color: {AppleColors.TEXT_TER};
+            font-size: 14px;
+        ''')
+        self.compose_preview.setText('选择原图和掩码后点击「合成」')
+        preview_layout.addWidget(self.compose_preview, stretch=1)
+
+        self.compose_stats = QLabel('')
+        self.compose_stats.setAlignment(Qt.AlignCenter)
+        self.compose_stats.setStyleSheet(f'color: {AppleColors.TEXT_TER}; font-size: 12px;')
+        preview_layout.addWidget(self.compose_stats)
+
+        preview_outer.addWidget(self.preview_card, stretch=1)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+        self.compose_btn = AppleButton('合成', primary=True)
+        self.compose_save_btn = AppleButton('保存', primary=False)
+        self.compose_save_btn.setEnabled(False)
+        btn_layout.addWidget(self.compose_btn)
+        btn_layout.addWidget(self.compose_save_btn)
+        preview_outer.addLayout(btn_layout)
+
+        main_layout.addWidget(preview_container, stretch=1)
+
+        # 信号
+        self.mask_mode_combo.currentIndexChanged.connect(self._on_mask_mode)
+        self._on_mask_mode(0)
+
+    def _on_mask_mode(self, idx):
+        """切换掩码来源: 0=加载文件, 1=实时生成"""
+        is_file = (idx == 0)
+        self.mask_file_row.setVisible(is_file)
+        self.depth_card.setVisible(not is_file)
 
 class RainRendererApp(QMainWindow):
     def __init__(self):
@@ -1474,6 +1745,9 @@ class RainRendererApp(QMainWindow):
         self.render_thread = None
         self.batch_thread = None
         self.depth_path = None
+        self._compose_image = None        # 原始图像 (用于合成预览)
+        self._rp_depth_path = None        # 渲染页面深度图路径
+        self._compose_result = None       # 合成结果缓存
         self.live_preview_timer = QTimer(self)
         self.live_preview_timer.setSingleShot(True)
         self.live_preview_timer.setInterval(120)
@@ -1522,12 +1796,14 @@ class RainRendererApp(QMainWindow):
         self.camera_page = CameraPage()
         self.output_page = OutputPage()
         self.batch_page = BatchPage()
+        self.compose_page = ComposePage()
 
         self.stack.addWidget(self.render_page)
         self.stack.addWidget(self.depth_page)
         self.stack.addWidget(self.camera_page)
         self.stack.addWidget(self.output_page)
         self.stack.addWidget(self.batch_page)
+        self.stack.addWidget(self.compose_page)
 
         body_layout.addWidget(self.stack, stretch=1)
         root_layout.addWidget(body, stretch=1)
@@ -1563,6 +1839,12 @@ class RainRendererApp(QMainWindow):
         self.render_page.render_btn.clicked.connect(self._on_manual_render)
         self.render_page.save_btn.clicked.connect(self._on_save)
 
+        # 渲染页面图像/深度选择
+        self.render_page.image_browse_btn.clicked.connect(self._rp_browse_image)
+        self.render_page.image_clear_btn.clicked.connect(self._rp_clear_image)
+        self.render_page.depth_browse_btn.clicked.connect(self._rp_browse_depth)
+        self.render_page.depth_clear_btn.clicked.connect(self._rp_clear_depth)
+
         # 预览大图（双击）
         self.render_page.preview_label.mouseDoubleClickEvent = self._on_preview_dblclick
 
@@ -1581,6 +1863,13 @@ class RainRendererApp(QMainWindow):
         self.batch_page.batch_browse_btn.clicked.connect(self._browse_batch_dir)
         self.batch_page.batch_out_btn.clicked.connect(self._browse_batch_out)
         self.batch_page.batch_btn.clicked.connect(self._on_batch_render)
+
+        # 合成页面信号
+        self.compose_page.image_browse_btn.clicked.connect(self._compose_browse_image)
+        self.compose_page.mask_browse_btn.clicked.connect(self._compose_browse_mask)
+        self.compose_page.depth_browse_btn.clicked.connect(self._compose_browse_depth)
+        self.compose_page.compose_btn.clicked.connect(self._on_compose)
+        self.compose_page.compose_save_btn.clicked.connect(self._on_compose_save)
 
         # 实时预览
         live_controls = [
@@ -1614,6 +1903,43 @@ class RainRendererApp(QMainWindow):
             self._schedule_live_preview
         )
 
+    # ---- 渲染页面图像/深度选择 ----
+
+    def _rp_browse_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择原始图像', '',
+            '图像文件 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;所有文件 (*)')
+        if path:
+            raw = np.fromfile(path, dtype=np.uint8)
+            img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+            if img is not None:
+                self._compose_image = img
+                self.render_page.image_edit.setText(os.path.basename(path))
+                self.render_page.image_clear_btn.setVisible(True)
+                self._schedule_live_preview()
+
+    def _rp_clear_image(self):
+        self._compose_image = None
+        self.render_page.image_edit.setText('')
+        self.render_page.image_clear_btn.setVisible(False)
+        self._schedule_live_preview()
+
+    def _rp_browse_depth(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择深度图', '',
+            '图像文件 (*.png *.tif *.tiff);;所有文件 (*)')
+        if path:
+            self._rp_depth_path = path
+            self.render_page.depth_edit.setText(os.path.basename(path))
+            self.render_page.depth_clear_btn.setVisible(True)
+            self._schedule_live_preview()
+
+    def _rp_clear_depth(self):
+        self._rp_depth_path = None
+        self.render_page.depth_edit.setText('')
+        self.render_page.depth_clear_btn.setVisible(False)
+        self._schedule_live_preview()
+
     # ---- 事件处理 ----
 
     def _schedule_live_preview(self, *_):
@@ -1638,6 +1964,17 @@ class RainRendererApp(QMainWindow):
             return
 
         params = self._get_render_params()
+
+        # 渲染页面深度图优先
+        if self._rp_depth_path:
+            params['depth_path'] = self._rp_depth_path
+
+        # 有原始图像时，用其尺寸渲染
+        if self._compose_image is not None:
+            H, W = self._compose_image.shape[:2]
+            params['image_width'] = W
+            params['image_height'] = H
+
         self._active_render_show_toast = show_toast
 
         self.render_page.render_btn.setEnabled(False)
@@ -1784,7 +2121,26 @@ class RainRendererApp(QMainWindow):
 
     def _on_render_done(self, mask):
         self.current_mask = mask
-        self._display_mask(mask)
+
+        if self._compose_image is not None:
+            # Screen Blend 合成预览
+            img = self._compose_image
+            H, W = img.shape[:2]
+            m = mask
+            if m.shape[:2] != (H, W):
+                m = cv2.resize(m, (W, H), interpolation=cv2.INTER_LINEAR)
+            mask_f = m.astype(np.float32) / 255.0
+            rain_layer = np.zeros_like(img, dtype=np.float32)
+            rain_layer[:, :, 0] = mask_f * 0.85   # B
+            rain_layer[:, :, 1] = mask_f * 0.90   # G
+            rain_layer[:, :, 2] = mask_f * 0.95   # R
+            img_f = img.astype(np.float32) / 255.0
+            result = 1.0 - (1.0 - img_f) * (1.0 - rain_layer)
+            self._compose_result = np.clip(result * 255, 0, 255).astype(np.uint8)
+            self._display_composite(self._compose_result)
+        else:
+            self._compose_result = None
+            self._display_mask(mask)
 
         total = mask.size
         rain_px = int(np.sum(mask > 0))
@@ -1827,22 +2183,38 @@ class RainRendererApp(QMainWindow):
                                           Qt.SmoothTransformation)
         label.setPixmap(scaled)
 
+    def _display_composite(self, result):
+        h, w = result.shape[:2]
+        result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+        qimg = QImage(result_rgb.data, w, h, w * 3, QImage.Format_RGB888)
+        self._full_pixmap = QPixmap.fromImage(qimg).copy()
+        label = self.render_page.preview_label
+        scaled = self._full_pixmap.scaled(label.size(), Qt.KeepAspectRatio,
+                                          Qt.SmoothTransformation)
+        label.setPixmap(scaled)
+
     def _on_preview_dblclick(self, event):
         if self.current_mask is not None and hasattr(self, '_full_pixmap'):
             dialog = ImagePreviewDialog(self._full_pixmap, self)
             dialog.showFullScreen()
 
     def _on_save(self):
-        if self.current_mask is None:
+        # 合成结果优先, 否则保存掩码
+        if self._compose_result is not None:
+            data = self._compose_result
+            default_name = 'rain_composite.png'
+        elif self.current_mask is not None:
+            data = self.current_mask
+            default_name = 'rain_mask.png'
+        else:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, '保存雨滴掩码', 'rain_mask.png',
+            self, '保存图像', default_name,
             'PNG (*.png);;JPEG (*.jpg);;BMP (*.bmp);;所有文件 (*)'
         )
         if path:
-            # cv2.imwrite 不支持中文路径，用 imencode + tofile 替代
             ext = os.path.splitext(path)[1] if os.path.splitext(path)[1] else '.png'
-            ok, buf = cv2.imencode(ext, self.current_mask)
+            ok, buf = cv2.imencode(ext, data)
             if ok:
                 buf.tofile(path)
                 self._show_info_bar(f'已保存到 {os.path.basename(path)}', 'success')
@@ -1907,8 +2279,112 @@ class RainRendererApp(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.current_mask is not None:
+        if self._compose_result is not None:
+            self._display_composite(self._compose_result)
+        elif self.current_mask is not None:
             self._display_mask(self.current_mask)
+
+    # ---- 合成页面方法 ----
+
+    def _compose_browse_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择原始图像', '', '图像文件 (*.png *.jpg *.bmp)')
+        if path:
+            self.compose_page.image_path = path
+            self.compose_page.image_edit.setText(path)
+
+    def _compose_browse_mask(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择雨滴掩码', '', '图像文件 (*.png *.jpg *.bmp)')
+        if path:
+            self.compose_page.mask_path = path
+            self.compose_page.mask_edit.setText(path)
+
+    def _compose_browse_depth(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择深度图', '', '图像文件 (*.png)')
+        if path:
+            self.compose_page.depth_path = path
+            self.compose_page.depth_edit.setText(path)
+
+    def _on_compose(self):
+        cp = self.compose_page
+        img_path = cp.image_path
+        if not img_path or not os.path.isfile(img_path):
+            cp.compose_stats.setText('请先选择原始图像')
+            return
+
+        # 读取原图
+        raw = np.fromfile(img_path, dtype=np.uint8)
+        img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        if img is None:
+            cp.compose_stats.setText('无法读取原始图像')
+            return
+        H, W = img.shape[:2]
+
+        mask_mode = cp.mask_mode_combo.currentIndex()
+
+        if mask_mode == 0:
+            # 加载掩码文件
+            mask_path = cp.mask_path
+            if not mask_path or not os.path.isfile(mask_path):
+                cp.compose_stats.setText('请选择掩码文件')
+                return
+            raw_m = np.fromfile(mask_path, dtype=np.uint8)
+            mask = cv2.imdecode(raw_m, cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                cp.compose_stats.setText('无法读取掩码文件')
+                return
+            if mask.shape[:2] != (H, W):
+                mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_LINEAR)
+        else:
+            # 实时生成掩码 (使用渲染页面的当前参数)
+            params = self._get_render_params()
+            depth_path = cp.depth_path
+            if depth_path and os.path.isfile(depth_path):
+                params['depth_path'] = depth_path
+            else:
+                params['depth_path'] = None
+            params['image_width'] = W
+            params['image_height'] = H
+            mask = render_rain_mask(**params)
+
+        # Screen Blend 合成
+        mask_f = mask.astype(np.float32) / 255.0
+        rain_layer = np.zeros_like(img, dtype=np.float32)
+        rain_layer[:, :, 0] = mask_f * 0.85   # B
+        rain_layer[:, :, 1] = mask_f * 0.90   # G
+        rain_layer[:, :, 2] = mask_f * 0.95   # R
+
+        img_f = img.astype(np.float32) / 255.0
+        result = 1.0 - (1.0 - img_f) * (1.0 - rain_layer)
+        self._compose_result = np.clip(result * 255, 0, 255).astype(np.uint8)
+
+        # 显示预览
+        result_rgb = cv2.cvtColor(self._compose_result, cv2.COLOR_BGR2RGB)
+        qimg = QImage(result_rgb.data, W, H, W * 3, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
+        label = cp.compose_preview
+        scaled = pixmap.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(scaled)
+
+        coverage = np.sum(mask > 0) / mask.size * 100
+        cp.compose_stats.setText(f'{W}x{H}  |  掩码覆盖率: {coverage:.1f}%')
+        cp.compose_save_btn.setEnabled(True)
+
+    def _on_compose_save(self):
+        if not hasattr(self, '_compose_result') or self._compose_result is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, '保存合成图像', '', 'PNG (*.png);;JPEG (*.jpg)')
+        if path:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in ('.jpg', '.jpeg'):
+                ok, buf = cv2.imencode('.jpg', self._compose_result, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            else:
+                ok, buf = cv2.imencode('.png', self._compose_result)
+            if ok:
+                buf.tofile(path)
 
 
 # ===========================================================================
