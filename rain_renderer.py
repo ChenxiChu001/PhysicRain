@@ -776,6 +776,11 @@ def render_rain_mask(depth_path: Optional[str] = None,
                      brightness_max: int = 255,
                      streak_softness: float = 0.0,
                      harmonic_blend: float = 0.0,
+                     radial_strength: float = 0.3,
+                     fx_px: float = 0.0,
+                     fy_px: float = 0.0,
+                     cx_px: float = 0.0,
+                     cy_px: float = 0.0,
                      seed: Optional[int] = None) -> np.ndarray:
     """
     主渲染函数：生成物理真实的雨滴掩码图
@@ -822,26 +827,34 @@ def render_rain_mask(depth_path: Optional[str] = None,
         'cam_height': cam_height,
         'cam_pitch': cam_pitch,
     }
-    if camera_json_path is None:
-        camera_json_path = infer_cityscapes_camera_json_path(depth_path)
 
-    if camera_json_path is not None and os.path.isfile(camera_json_path):
-        city_cam = load_cityscapes_camera(camera_json_path)
-        # Cityscapes 内参是按原始分辨率 (2048x1024) 标定的，
-        # 渲染到不同分辨率时必须等比缩放 fx/fy/cx/cy。
-        # 通过主点坐标推断原始分辨率（主点约在图像中心）。
-        orig_w = round(city_cam['cx_px'] * 2)
-        orig_h = round(city_cam['cy_px'] * 2)
-        scale_x = image_width / orig_w if orig_w > 0 else 1.0
-        scale_y = image_height / orig_h if orig_h > 0 else 1.0
+    # 优先使用直接提供的像素内参
+    if fx_px > 0 and fy_px > 0:
         camera_kwargs.update({
-            'fx_px': city_cam['fx_px'] * scale_x,
-            'fy_px': city_cam['fy_px'] * scale_y,
-            'cx_px': city_cam['cx_px'] * scale_x,
-            'cy_px': city_cam['cy_px'] * scale_y,
-            'cam_height': city_cam['cam_height'],
-            'cam_pitch': city_cam['cam_pitch'],
+            'fx_px': fx_px,
+            'fy_px': fy_px,
+            'cx_px': cx_px if cx_px > 0 else image_width / 2.0,
+            'cy_px': cy_px if cy_px > 0 else image_height / 2.0,
         })
+    else:
+        # 否则尝试从 camera json 加载
+        if camera_json_path is None:
+            camera_json_path = infer_cityscapes_camera_json_path(depth_path)
+
+        if camera_json_path is not None and os.path.isfile(camera_json_path):
+            city_cam = load_cityscapes_camera(camera_json_path)
+            orig_w = round(city_cam['cx_px'] * 2)
+            orig_h = round(city_cam['cy_px'] * 2)
+            scale_x = image_width / orig_w if orig_w > 0 else 1.0
+            scale_y = image_height / orig_h if orig_h > 0 else 1.0
+            camera_kwargs.update({
+                'fx_px': city_cam['fx_px'] * scale_x,
+                'fy_px': city_cam['fy_px'] * scale_y,
+                'cx_px': city_cam['cx_px'] * scale_x,
+                'cy_px': city_cam['cy_px'] * scale_y,
+                'cam_height': city_cam['cam_height'],
+                'cam_pitch': city_cam['cam_pitch'],
+            })
 
     camera = CameraParams(**camera_kwargs)
     rain_params = RainParams(
@@ -926,7 +939,8 @@ def render_rain_mask(depth_path: Optional[str] = None,
     # 纵深风的径向投影位移
     if abs(v_z) > 0.01:
         # 纵深位移比: 曝光期间沿 Z 轴移动的比例
-        dz_ratio = disp_z / drops['depth']
+        # radial_strength 控制径向辐射效果强度 (0=无辐射, 1=完全物理)
+        dz_ratio = disp_z / drops['depth'] * float(np.clip(radial_strength, 0.0, 1.0))
         # 径向位移: 透视投影下 Δx = -(x-cx) * dZ/Z
         #   北风 (迎面, dZ<0): 雨滴朝相机来 → 投影从消失点向外发散
         #   南风 (顺风, dZ>0): 雨滴远离相机 → 投影向消失点汇聚
@@ -1139,6 +1153,7 @@ def batch_render(depth_dir: str, output_dir: str,
                  brightness_max: int = 255,
                  streak_softness: float = 0.0,
                  harmonic_blend: float = 0.0,
+                 radial_strength: float = 0.3,
                  seed: Optional[int] = 42) -> None:
     """
     批量处理：为每张深度图生成对应的雨滴掩码
@@ -1204,6 +1219,7 @@ def batch_render(depth_dir: str, output_dir: str,
             brightness_max=brightness_max,
             streak_softness=streak_softness,
             harmonic_blend=harmonic_blend,
+            radial_strength=radial_strength,
             seed=img_seed
         )
 

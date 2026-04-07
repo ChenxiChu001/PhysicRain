@@ -28,7 +28,57 @@ from PyQt5.QtGui import (
     QRadialGradient, QFontDatabase
 )
 
-from rain_renderer import render_rain_mask
+from rain_renderer import render_rain_mask, load_cityscapes_camera
+
+
+def find_camera_json_for_path(file_path: str):
+    """从任意 Cityscapes 风格路径推断对应的 camera json 路径。
+
+    支持从图像/深度图/视差图路径反推 camera json:
+      .../dataset/leftImg8bit_trainvaltest/leftImg8bit/train/aachen/aachen_000003_000019_leftImg8bit.png
+      → .../dataset/camera_trainvaltest/camera/train/aachen/aachen_000003_000019_camera.json
+    """
+    if not file_path:
+        return None
+    norm = os.path.normpath(file_path).replace('\\', '/')
+    base = os.path.basename(norm)
+
+    # 提取 stem: aachen_000003_000019
+    stem = base
+    for suffix in ('_leftImg8bit_depth_u16.png', '_leftImg8bit_depth_u8.png',
+                    '_leftImg8bit.png', '_depth_u16.png', '_depth.png',
+                    '_disparity.png', '.png', '.jpg'):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+
+    cam_filename = f'{stem}_camera.json'
+
+    # 策略1: 同目录查找
+    same_dir = os.path.join(os.path.dirname(norm), cam_filename)
+    if os.path.isfile(same_dir):
+        return same_dir
+
+    # 策略2: 从路径中提取 split/city, 向上找 dataset 根
+    parts = norm.split('/')
+    # 找 train/val/test 位置
+    split_idx = None
+    for i, p in enumerate(parts):
+        if p in ('train', 'val', 'test'):
+            split_idx = i
+            break
+    if split_idx is not None and split_idx + 1 < len(parts):
+        split_name = parts[split_idx]      # train/val/test
+        city = parts[split_idx + 1]        # aachen/berlin/...
+        # 从 split 向上逐级找含 camera_trainvaltest 的祖先
+        for level in range(split_idx):
+            ancestor = '/'.join(parts[:split_idx - level])
+            cam = os.path.join(ancestor, 'camera_trainvaltest', 'camera',
+                               split_name, city, cam_filename)
+            if os.path.isfile(cam):
+                return cam
+
+    return None
 
 
 # ===========================================================================
@@ -234,6 +284,7 @@ class BatchRenderThread(QThread):
                         brightness_min=self.params.get('brightness_min', 40),
                         brightness_max=self.params.get('brightness_max', 255),
                         harmonic_blend=self.params.get('harmonic_blend', 0.0),
+                        radial_strength=self.params.get('radial_strength', 0.3),
                         seed=img_seed,
                     )
                     cv2.imencode('.png', mask)[1].tofile(out_path)
@@ -1002,10 +1053,12 @@ class RenderParamsPage(QWidget):
         self.wind_dir_fine = AppleSliderRow('微调', 0, 360, 315, 1, 0, '°')
         self.wind_dir_combo.currentIndexChanged.connect(self._on_wind_combo)
 
+        self.radial_strength = AppleSliderRow('径向强度', 0.0, 1.0, 0.3, 0.01, 2, '')
         rain_card.addRow(self.rain_rate)
         rain_card.addRow(self.wind_speed)
         rain_card.addRow(self.wind_dir_widget)
         rain_card.addRow(self.wind_dir_fine)
+        rain_card.addRow(self.radial_strength)
         layout.addWidget(rain_card)
 
         # 快门与湍流卡片
@@ -1267,16 +1320,53 @@ class CameraPage(QScrollArea):
         toggle_card.addRow(toggle_row)
         layout.addWidget(toggle_card)
 
-        # 内参卡片
-        self.intrinsic_card = AppleCard('内参')
+        # 自动加载卡片
+        load_card = AppleCard('自动加载')
+        load_row = QWidget()
+        load_row.setFixedHeight(52)
+        load_lay = QHBoxLayout(load_row)
+        load_lay.setContentsMargins(16, 0, 16, 0)
+        self.cam_json_edit = QLineEdit()
+        self.cam_json_edit.setPlaceholderText('选择 camera json 或自动检测...')
+        self.cam_json_edit.setReadOnly(True)
+        self.cam_json_edit.setStyleSheet(f'''
+            QLineEdit {{
+                background: {AppleColors.BG_TERTIARY};
+                border: none; border-radius: 8px;
+                padding: 6px 12px;
+                color: {AppleColors.TEXT}; font-size: 13px;
+            }}
+        ''')
+        self.cam_json_browse = AppleButton('浏览', primary=False)
+        self.cam_json_browse.setFixedWidth(70)
+        load_lay.addWidget(self.cam_json_edit, stretch=1)
+        load_lay.addWidget(self.cam_json_browse)
+        load_card.addRow(load_row)
+        layout.addWidget(load_card)
+
+        # 内参卡片 - 像素单位 (Cityscapes 标定)
+        self.intrinsic_card = AppleCard('内参 (像素)')
+        self.fx_px = AppleSliderRow('fx', 500.0, 5000.0, 2262.0, 1.0, 1, ' px')
+        self.fy_px = AppleSliderRow('fy', 500.0, 5000.0, 2265.0, 1.0, 1, ' px')
+        self.cx_px = AppleSliderRow('cx', 0.0, 2500.0, 1024.0, 1.0, 1, ' px')
+        self.cy_px = AppleSliderRow('cy', 0.0, 1500.0, 512.0, 1.0, 1, ' px')
+        self.intrinsic_card.addRow(self.fx_px)
+        self.intrinsic_card.addRow(self.fy_px)
+        self.intrinsic_card.addRow(self.cx_px)
+        self.intrinsic_card.addRow(self.cy_px)
+        self.intrinsic_card.setEnabled(False)
+        layout.addWidget(self.intrinsic_card)
+
+        # 镜头参数 (通用)
+        self.lens_card = AppleCard('镜头')
         self.focal_length = AppleSliderRow('焦距', 10.0, 200.0, 35.0, 1.0, 1, ' mm')
         self.sensor_w = AppleSliderRow('传感器宽', 10.0, 70.0, 36.0, 0.5, 1, ' mm')
         self.sensor_h = AppleSliderRow('传感器高', 10.0, 70.0, 24.0, 0.5, 1, ' mm')
-        self.intrinsic_card.addRow(self.focal_length)
-        self.intrinsic_card.addRow(self.sensor_w)
-        self.intrinsic_card.addRow(self.sensor_h)
-        self.intrinsic_card.setEnabled(False)
-        layout.addWidget(self.intrinsic_card)
+        self.lens_card.addRow(self.focal_length)
+        self.lens_card.addRow(self.sensor_w)
+        self.lens_card.addRow(self.sensor_h)
+        self.lens_card.setEnabled(False)
+        layout.addWidget(self.lens_card)
 
         # 外参卡片
         self.extrinsic_card = AppleCard('外参')
@@ -1287,11 +1377,11 @@ class CameraPage(QScrollArea):
         self.extrinsic_card.setEnabled(False)
         layout.addWidget(self.extrinsic_card)
 
-        # 默认参数说明
-        info_label = QLabel('关闭自定义时使用默认参数：焦距 35mm / 全画幅 36x24mm / 高度 1.6m')
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet(f'color: {AppleColors.TEXT_TER}; font-size: 12px; padding: 4px 4px;')
-        layout.addWidget(info_label)
+        # 状态标签
+        self.cam_info_label = QLabel('关闭自定义时使用默认参数：焦距 35mm / 全画幅 36x24mm / 高度 1.6m')
+        self.cam_info_label.setWordWrap(True)
+        self.cam_info_label.setStyleSheet(f'color: {AppleColors.TEXT_TER}; font-size: 12px; padding: 4px 4px;')
+        layout.addWidget(self.cam_info_label)
 
         layout.addStretch()
         self.setWidget(container)
@@ -1854,6 +1944,7 @@ class RainRendererApp(QMainWindow):
 
         # 相机
         self.camera_page.custom_cam_toggle.toggled.connect(self._on_cam_toggle)
+        self.camera_page.cam_json_browse.clicked.connect(self._browse_camera_json)
 
         # 输出尺寸锁定
         self.output_page.lock_toggle.toggled.connect(self._on_lock_ratio)
@@ -1884,9 +1975,14 @@ class RainRendererApp(QMainWindow):
             self.render_page.brightness_min.slider,
             self.render_page.brightness_max.slider,
             self.render_page.harmonic_blend.slider,
+            self.render_page.radial_strength.slider,
             self.camera_page.focal_length.slider,
             self.camera_page.sensor_w.slider,
             self.camera_page.sensor_h.slider,
+            self.camera_page.fx_px.slider,
+            self.camera_page.fy_px.slider,
+            self.camera_page.cx_px.slider,
+            self.camera_page.cy_px.slider,
             self.camera_page.cam_height.slider,
             self.camera_page.cam_pitch.slider,
             self.output_page.out_width,
@@ -2010,8 +2106,50 @@ class RainRendererApp(QMainWindow):
 
     def _on_cam_toggle(self, checked):
         self.camera_page.intrinsic_card.setEnabled(checked)
+        self.camera_page.lens_card.setEnabled(checked)
         self.camera_page.extrinsic_card.setEnabled(checked)
         self._schedule_live_preview()
+
+    def _try_auto_load_camera(self, file_path):
+        """尝试从文件路径自动查找并加载 Cityscapes 相机参数"""
+        cam_json = find_camera_json_for_path(file_path)
+        if cam_json is None:
+            return
+        self._load_camera_json(cam_json)
+
+    def _load_camera_json(self, cam_json_path):
+        """加载 camera json 并填充 GUI"""
+        try:
+            cam = load_cityscapes_camera(cam_json_path)
+        except Exception as e:
+            self.camera_page.cam_info_label.setText(f'加载失败: {e}')
+            return
+
+        cp = self.camera_page
+        cp.custom_cam_toggle.setChecked(True)
+        cp.cam_json_edit.setText(cam_json_path)
+
+        # 直接填入像素内参
+        cp.fx_px.setValue(cam['fx_px'])
+        cp.fy_px.setValue(cam['fy_px'])
+        cp.cx_px.setValue(cam['cx_px'])
+        cp.cy_px.setValue(cam['cy_px'])
+
+        # 外参
+        cp.cam_height.setValue(cam.get('cam_height', 1.6))
+        cp.cam_pitch.setValue(cam.get('cam_pitch', 0.0))
+
+        cp.cam_info_label.setText(
+            f'已加载: {os.path.basename(cam_json_path)}  |  '
+            f'fx={cam["fx_px"]:.1f}  fy={cam["fy_px"]:.1f}  '
+            f'cx={cam["cx_px"]:.1f}  cy={cam["cy_px"]:.1f}'
+        )
+
+    def _browse_camera_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择相机标定 JSON', '', 'JSON (*.json)')
+        if path:
+            self._load_camera_json(path)
 
     def _on_lock_ratio(self, checked):
         if checked:
@@ -2034,6 +2172,7 @@ class RainRendererApp(QMainWindow):
             self.depth_path = path
             self.depth_page.depth_path_edit.setText(path)
             self._show_depth_preview(path)
+            self._try_auto_load_camera(path)
             self._schedule_live_preview()
 
     def _show_depth_preview(self, path):
@@ -2091,6 +2230,7 @@ class RainRendererApp(QMainWindow):
             'brightness_min': int(rp.brightness_min.value()),
             'brightness_max': int(rp.brightness_max.value()),
             'harmonic_blend': rp.harmonic_blend.value(),
+            'radial_strength': rp.radial_strength.value(),
             'image_width': op.out_width.value(),
             'image_height': op.out_height.value(),
         }
@@ -2108,6 +2248,11 @@ class RainRendererApp(QMainWindow):
             params['sensor_height'] = cp.sensor_h.value()
             params['cam_height'] = cp.cam_height.value()
             params['cam_pitch'] = cp.cam_pitch.value()
+            # 像素内参 (优先于 focal_length/sensor 计算)
+            params['fx_px'] = cp.fx_px.value()
+            params['fy_px'] = cp.fy_px.value()
+            params['cx_px'] = cp.cx_px.value()
+            params['cy_px'] = cp.cy_px.value()
         else:
             params['focal_length'] = 35.0
             params['sensor_width'] = 36.0
@@ -2292,6 +2437,7 @@ class RainRendererApp(QMainWindow):
         if path:
             self.compose_page.image_path = path
             self.compose_page.image_edit.setText(path)
+            self._try_auto_load_camera(path)
 
     def _compose_browse_mask(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -2306,6 +2452,7 @@ class RainRendererApp(QMainWindow):
         if path:
             self.compose_page.depth_path = path
             self.compose_page.depth_edit.setText(path)
+            self._try_auto_load_camera(path)
 
     def _on_compose(self):
         cp = self.compose_page
