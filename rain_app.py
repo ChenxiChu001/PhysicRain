@@ -1063,16 +1063,16 @@ class RenderParamsPage(QWidget):
 
         # 快门与湍流卡片
         motion_card = AppleCard('运动')
-        self.exposure = AppleSliderRow('快门时间', 0.001, 0.2, 1/30, 0.001, 3, ' s')
-        self.turbulence = AppleSliderRow('湍流强度', 0.0, 15.0, 2.5, 0.1, 1, ' °')
+        self.exposure = AppleSliderRow('快门时间', 0.001, 0.2, 0.012, 0.001, 3, ' s')
+        self.turbulence = AppleSliderRow('湍流强度', 0.0, 15.0, 0.0, 0.1, 1, ' °')
         motion_card.addRow(self.exposure)
         motion_card.addRow(self.turbulence)
         layout.addWidget(motion_card)
 
         # 光学参数卡片
         optics_card = AppleCard('光学')
-        self.focus_dist = AppleSliderRow('对焦距离', 1.0, 100.0, 12.0, 0.5, 1, ' m')
-        self.dof_strength = AppleSliderRow('景深强度', 0.0, 1.0, 0.15, 0.01, 2, '')
+        self.focus_dist = AppleSliderRow('对焦距离', 0.1, 100.0, 0.5, 0.1, 1, ' m')
+        self.dof_strength = AppleSliderRow('景深强度', 0.0, 1.0, 0.10, 0.01, 2, '')
         self.depth_scale = AppleSliderRow('场景深度', 10.0, 500.0, 100.0, 1.0, 0, ' m')
         optics_card.addRow(self.focus_dist)
         optics_card.addRow(self.dof_strength)
@@ -1081,15 +1081,15 @@ class RenderParamsPage(QWidget):
 
         # 亮度参数卡片
         brightness_card = AppleCard('雨丝亮度')
-        self.brightness_min = AppleSliderRow('最低亮度', 0, 255, 40, 1, 0, '')
-        self.brightness_max = AppleSliderRow('最高亮度', 0, 255, 255, 1, 0, '')
+        self.brightness_min = AppleSliderRow('最低亮度', 0, 255, 45, 1, 0, '')
+        self.brightness_max = AppleSliderRow('最高亮度', 0, 255, 90, 1, 0, '')
         brightness_card.addRow(self.brightness_min)
         brightness_card.addRow(self.brightness_max)
         layout.addWidget(brightness_card)
 
         # 深度映射卡片
         depth_map_card = AppleCard('深度映射')
-        self.harmonic_blend = AppleSliderRow('调和混合', 0.0, 1.0, 0.0, 0.01, 2, '')
+        self.harmonic_blend = AppleSliderRow('调和混合', 0.0, 1.0, 0.92, 0.01, 2, '')
         depth_map_card.addRow(self.harmonic_blend)
         layout.addWidget(depth_map_card)
 

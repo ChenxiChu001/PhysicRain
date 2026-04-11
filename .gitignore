@@ -16,6 +16,15 @@ rain_output/
 batch_test_masks/
 batch_test_output/
 
+# 批量生成产物（不上传）
+batch_masks/
+batch_output/
+batch_output.zip
+dataset_create/
+dataset_create_masks/
+rain_mask.png
+rain_composite.png
+
 # 测试数据集（太大不上传）
 test_dataset/
 test_depth/
